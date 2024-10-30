@@ -92,8 +92,7 @@ def rescale_magvit_output(magvit_output):
     return clipped_output
 
 
-def decode_latents_wrapper(batch_size=16, tokenizer_ckpt="data/magvit2.ckpt", max_images=None):
-    device = "cuda"
+def decode_latents_wrapper(batch_size=16, tokenizer_ckpt="../data/magvit2.ckpt", max_images=None, device='cuda'):
     dtype = torch.bfloat16
 
     model_config = VQConfig()
@@ -101,12 +100,11 @@ def decode_latents_wrapper(batch_size=16, tokenizer_ckpt="data/magvit2.ckpt", ma
     model = model.to(device=device, dtype=dtype)
 
     @torch.no_grad()
-    def decode_latents(video_data):
+    def decode_latents(video_data, device='cuda'):
         """
         video_data: (b, h, w), where b is different from training/eval batch size.
         """
         decoded_imgs = []
-
         for shard_ind in range(math.ceil(len(video_data) / batch_size)):
             batch = torch.from_numpy(video_data[shard_ind * batch_size: (shard_ind + 1) * batch_size].astype(np.int64))
             if model.use_ema:
