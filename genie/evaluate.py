@@ -35,7 +35,7 @@ STRIDE = 15  # Data is 30 Hz so with stride 15, video is 2 Hz
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate GENIE-style models.")
     parser.add_argument(
-        "--val_data_dir", type=str, default="data/val_v1.1",
+        "--val_data_dir", type=str, default="../data/val_v1.1",
         help="A directory with video data, should have a `metadata.json` and `video.bin`."
     )
     parser.add_argument(
@@ -62,6 +62,12 @@ def parse_args():
         "--max_examples", type=int,
         help="If specified, will stop evaluation early after `max_examples` examples."
     )
+    parser.add_argument(
+        "--log_file",
+        type=str,
+        default='outputs/evaluate.txt',
+        help="If specified, will stop evaluation early after `max_examples` examples."
+    )
 
     return parser.parse_args()
 
@@ -78,6 +84,9 @@ class GenieEvaluator:
         self.decode_latents = decode_latents
         self.device = device
         self.args = args
+        self.latent_h, self.latent_w = args.latent_h, args.latent_w
+        self.maskgit_steps = args.maskgit_steps
+        self.temperature = args.temperature
 
     def predict_zframe_logits(self, input_ids: torch.LongTensor) -> tuple[torch.LongTensor, torch.FloatTensor]:
         """
@@ -101,7 +110,7 @@ class GenieEvaluator:
                 Note that we are factorizing the 2**18 vocabulary into two separate vocabularies of size 512 each.
         """
         inputs_THW = rearrange(input_ids, "b (t h w) -> b t h w", t=WINDOW_SIZE,
-                               h=self.args.latent_h, w=self.args.latent_w).to(self.device)
+            h=self.latent_h, w=self.latent_w).to(self.device)
         all_samples = []
         all_logits = []
         for timestep in range(1, WINDOW_SIZE):
@@ -111,8 +120,10 @@ class GenieEvaluator:
 
             # MaskGIT sampling
             samples_HW, factored_logits = self.model.maskgit_generate(
-                inputs_masked, out_t=timestep, maskgit_steps=self.args.maskgit_steps,
-                temperature=self.args.temperature,
+                inputs_masked, 
+                out_t=timestep, 
+                maskgit_steps=self.maskgit_steps,
+                temperature=self.temperature,
             )
 
             all_samples.append(samples_HW)
@@ -121,7 +132,7 @@ class GenieEvaluator:
         samples_THW = torch.stack(all_samples, dim=1)
         return samples_THW, torch.stack(all_logits, dim=3)
 
-    def predict_next_frames(self, samples_THW) -> torch.Tensor:
+    def predict_next_frames(self, samples_THW, device='cuda') -> torch.Tensor:
         """
         All model submissions should have this defined.
 
@@ -139,7 +150,7 @@ class GenieEvaluator:
         Returns:
             LongTensor of size (B, T-1, 3, 256, 256) corresponding to the predicted frames.
         """
-        return decode_tokens(samples_THW.cpu(), self.decode_latents)
+        return decode_tokens(samples_THW.cpu(), self.decode_latents, device=device)
 
 
 @torch.no_grad()
@@ -164,6 +175,7 @@ def main():
     if args.save_outputs_dir is not None:
         outputs_to_save = defaultdict(list)
 
+    f = open(args.log_file, 'w')
     for batch in tqdm(dataloader):
         batch_size = batch["input_ids"].size(0)
         reshaped_input_ids = rearrange(batch["input_ids"], "b (t h w) -> b t h w", t=WINDOW_SIZE,
@@ -194,7 +206,11 @@ def main():
             outputs_to_save["pred_logits"].append(factored_logits)
             outputs_to_save["gtruth_frames"].append(decoded_gtruth)
             outputs_to_save["gtruth_tokens"].append(reshaped_input_ids)
-
+    
+    for key,val in metrics.items():
+        f.write(key + ': ' + str(val.mean()) + '\n')
+    f.close()
+    
     if args.save_outputs_dir is not None:
         os.makedirs(args.save_outputs_dir, exist_ok=True)
         save_outputs_dir = Path(args.save_outputs_dir)

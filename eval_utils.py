@@ -25,7 +25,7 @@ class AvgMetric:
         return self.total / self.count
 
 
-def decode_tokens(reshaped_token_ids: torch.LongTensor, decode_latents: Callable) -> torch.ByteTensor:
+def decode_tokens(reshaped_token_ids: torch.LongTensor, decode_latents: Callable, device='cuda') -> torch.ByteTensor:
     """
     Converts quantized latent space tokens to images.
 
@@ -36,7 +36,7 @@ def decode_tokens(reshaped_token_ids: torch.LongTensor, decode_latents: Callable
     Returns:
         (B, T, 3, 256, 256)
     """
-    decoded_imgs = decode_latents(rearrange(reshaped_token_ids, "b t h w -> (b t) h w").cpu().numpy())
+    decoded_imgs = decode_latents(rearrange(reshaped_token_ids, "b t h w -> (b t) h w").cpu().numpy(), device=device)
     decoded_tensor = torch.stack([transforms_f.pil_to_tensor(pred_img) for pred_img in decoded_imgs])
     return rearrange(decoded_tensor, "(b t) c H W -> b t c H W", b=reshaped_token_ids.size(0))
 

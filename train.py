@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import time
+import datetime
 
 import matplotlib
 import mup
@@ -24,7 +25,7 @@ from transformers import (
 )
 
 from data import RawTokenDataset, get_maskgit_collator
-from eval_utils import decode_tokens, compute_lpips
+from eval_utils import decode_tokens, compute_lpips, compute_loss
 from genie.st_mask_git import GenieConfig, STMaskGIT
 # from llama.config import LlamaConfig1X
 # from llama.modeling_llama_mup import LlamaForCausalLM
@@ -102,7 +103,7 @@ def parse_args():
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=4,
+        default=9,
         help="Batch size (per device) for the training dataloader.",
     )
     parser.add_argument(
@@ -125,11 +126,11 @@ def parse_args():
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=1e-4,
+        default=1e-5,
         help="Initial learning rate (after the potential warmup period) to use.",
     )
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
-    parser.add_argument("--num_train_epochs", type=int, default=1, help="Total number of training epochs to perform.")
+    parser.add_argument("--num_train_epochs", type=int, default=4, help="Total number of training epochs to perform.")
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -145,13 +146,13 @@ def parse_args():
     parser.add_argument(
         "--eval_every_n_steps",
         type=int,
-        default=1000,
+        default=1e5,
         help="Eval every N training steps.",
     )
     parser.add_argument(
         "--vis_every_n_steps",
         type=int,
-        default=1000,
+        default=10000,
         help="Visualize every N training steps.",
     )
     parser.add_argument(
@@ -162,7 +163,7 @@ def parse_args():
         choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup", "custom_cosine"],
     )
     parser.add_argument(
-        "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
+        "--num_warmup_steps", type=int, default=100, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument(
         "--max_grad_norm",
@@ -197,7 +198,7 @@ def parse_args():
     parser.add_argument(
         "--checkpointing_steps",
         type=str,
-        default="1000",
+        default="10000",
         help="Whether the various states should be saved at the end of every n steps, or 'epoch' for each epoch.",
     )
     parser.add_argument("--seed", type=int, default=42, help="A seed for reproducible training.")
@@ -215,6 +216,11 @@ def parse_args():
         help="The integration to report the results and logs to.",
     )
     parser.add_argument(
+        "--log_name",
+        type=str,
+        help="The integration to report the results and logs to.",
+    )
+    parser.add_argument(
         "--mu_transfer",
         action="store_true",
         help="If specified, will train with mu transfer reparametrizations. Only supports Llama models."
@@ -226,7 +232,10 @@ def parse_args():
     )
 
     args = parser.parse_args()
-
+    now = datetime.datetime.now()
+    timestamp = now.strftime("%m-%d-%H-%M")
+    args.log_name += '-' + timestamp
+    args.output_dir += '/' + args.log_name
     return args
 
 
@@ -242,7 +251,6 @@ def save_checkpoint(model, accelerator, args, filename):
             save_path, is_main_process=accelerator.is_main_process, save_function=accelerator.save
         )
         accelerator.save_state(save_path)
-
 
 @torch.no_grad()
 def visualize(accelerator, model, dataloader, window_size, metrics_prefix="eval", max_steps=1):
@@ -270,8 +278,7 @@ def visualize(accelerator, model, dataloader, window_size, metrics_prefix="eval"
         num_prompt_frames = window_size // 2  # hardcoding half of frames for context
         num_new_tokens = latent_side_len ** 2 * (window_size - num_prompt_frames)
         prompt_input_ids = rearrange(reshaped_labels[:, :num_prompt_frames], "b t s -> b (t s)")
-        outputs = unwrapped_model.generate(input_ids=prompt_input_ids, attention_mask=torch.ones_like(prompt_input_ids),
-                                           max_new_tokens=num_new_tokens, min_new_tokens=num_new_tokens)
+        outputs, factored_logits = unwrapped_model.generate(input_ids=prompt_input_ids, attention_mask=torch.ones_like(prompt_input_ids), max_new_tokens=num_new_tokens, min_new_tokens=num_new_tokens, return_logits=True)
         output_tokens = rearrange(outputs, "b (t h w) -> b t h w", t=window_size,
                                   h=latent_side_len, w=latent_side_len)
         gtruth_tokens = rearrange(reshaped_labels[:, num_prompt_frames:], "b t (h w) -> b t h w",
@@ -309,7 +316,8 @@ def visualize(accelerator, model, dataloader, window_size, metrics_prefix="eval"
 
             metrics["ar_lpips"].extend(compute_lpips(decoded_gtruth,  # Note: not parallelizing right now
                                                      decoded_output[:, num_prompt_frames:], lpips_alex))
-
+            # loss = compute_loss(batch["labels"], factored_logits)
+            # metrics["loss"].extend(loss)
         if step + 1 >= max_steps:
             break
 
@@ -321,14 +329,13 @@ def visualize(accelerator, model, dataloader, window_size, metrics_prefix="eval"
         wandb_tracker = accelerator.get_tracker("wandb")
         wandb_tracker.log(metrics, commit=False)
 
-
 def main():
     args = parse_args()
     assert (args.llama_config is not None) ^ (args.genie_config is not None), \
         "Exactly one of `llama_config` and `genie_config` should be set."
 
     # Manual gradient accumulation
-    accelerator = Accelerator(gradient_accumulation_steps=1, log_with=args.report_to, project_dir=args.output_dir)
+    accelerator = Accelerator(gradient_accumulation_steps=1, log_with=args.report_to, project_dir=args.output_dir,)
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -423,6 +430,10 @@ def main():
             model.set_mup_shapes(rescale_params=True)
             model.init_weights()  # might be unnecessary if `rescale_params` is True
 
+        if args.resume_from_checkpoint:
+            model = STMaskGIT.from_pretrained(args.resume_from_checkpoint)
+            resume_step = None
+
     # Optimizer. Split weights in two groups, one with weight decay and the other not.
     no_decay = ["bias", "layer_norm.weight"]
     optimizer_grouped_parameters = [
@@ -439,7 +450,7 @@ def main():
     opt_class = mup.MuAdamW if args.mu_transfer else torch.optim.AdamW
     optimizer = opt_class(optimizer_grouped_parameters, lr=args.learning_rate,
                           betas=(args.adam_beta_1, args.adam_beta_2), eps=args.adam_eps)
-
+    
     # DataLoaders creation:
     collate_fn = default_data_collator if args.llama_config is not None else get_maskgit_collator(config)
     train_dataloader = DataLoader(
@@ -543,7 +554,9 @@ def main():
     experiment_config["FLOPs_per_update_step"] = 6 * experiment_config["model_parameters"] \
                                                  * experiment_config["effective_batch_size_tokens"]
 
-    accelerator.init_trackers(project_name="1XGPT_muP_MAGVIT2_v0", config=experiment_config)
+    accelerator.init_trackers(project_name="1XGPT_muP_MAGVIT2_v0", 
+                              config=experiment_config,
+                              init_kwargs={'wandb':{'name':args.log_name}})
 
     # Train!
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -562,36 +575,36 @@ def main():
     starting_epoch = 0
 
     # Potentially load in the weights and states from a previous save
-    if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
-            checkpoint_path = args.resume_from_checkpoint
-            path = os.path.basename(args.resume_from_checkpoint.rstrip("/"))
-        else:
-            # Get the most recent checkpoint
-            dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
-            dirs.sort(key=os.path.getctime)
-            path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
-            checkpoint_path = path
-            path = os.path.basename(checkpoint_path)
+    # if args.resume_from_checkpoint:
+    #     if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
+    #         checkpoint_path = args.resume_from_checkpoint
+    #         path = os.path.basename(args.resume_from_checkpoint.rstrip("/"))
+    #     else:
+    #         # Get the most recent checkpoint
+    #         dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
+    #         dirs.sort(key=os.path.getctime)
+    #         path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
+    #         checkpoint_path = path
+    #         path = os.path.basename(checkpoint_path)
 
-        accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
+    #     accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
 
-        tied_weights = getattr(config, "tie_word_embeddings", False)
-        accelerator.load_state(checkpoint_path, strict=not tied_weights)  # tied weights not saved so can't load strict, but also no need to tie again
+    #     tied_weights = getattr(config, "tie_word_embeddings", False)
+    #     accelerator.load_state(checkpoint_path, strict=not tied_weights)  # tied weights not saved so can't load strict, but also no need to tie again
 
-        # Extract `epoch_{i}` or `step_{i}`
-        training_difference = os.path.splitext(path)[0]
+    #     # Extract `epoch_{i}` or `step_{i}`
+    #     training_difference = os.path.splitext(path)[0]
 
-        if "epoch" in training_difference:
-            starting_epoch = int(training_difference.replace("epoch_", "")) + 1
-            resume_step = None
-            completed_steps = starting_epoch * num_update_steps_per_epoch
-        else:
-            # need to multiply `gradient_accumulation_steps` to reflect real steps
-            resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
-            starting_epoch = resume_step // len(train_dataloader)
-            completed_steps = resume_step // args.gradient_accumulation_steps
-            resume_step -= starting_epoch * len(train_dataloader)
+    #     if "epoch" in training_difference:
+    #         starting_epoch = int(training_difference.replace("epoch_", "")) + 1
+    #         resume_step = None
+    #         completed_steps = starting_epoch * num_update_steps_per_epoch
+    #     else:
+    #         # need to multiply `gradient_accumulation_steps` to reflect real steps
+    #         resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
+    #         starting_epoch = resume_step // len(train_dataloader)
+    #         completed_steps = resume_step // args.gradient_accumulation_steps
+    #         resume_step -= starting_epoch * len(train_dataloader)
 
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)

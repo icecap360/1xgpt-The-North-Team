@@ -22,7 +22,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Generates samples (as tokens) from GENIE model. "
                                                  "Optionally visualizes these tokens as GIFs or comics.")
     parser.add_argument(
-        "--val_data_dir", type=str, default="data/val_v1.1",
+        "--val_data_dir", type=str, default="../data/val_v1.1",
         help="A directory with video data, should have a `metadata.json` and `video.bin` We generate using the first frames of this dataset."
     )
     parser.add_argument(
@@ -30,7 +30,7 @@ def parse_args():
         help="Path to a HuggingFace-style checkpoint."
     )
     parser.add_argument(
-        "--output_dir", type=str, default="data/genie_generated",
+        "--output_dir", type=str, default="outputs/generated",
         help="Directory to save generated outputs."
     )
     parser.add_argument(
