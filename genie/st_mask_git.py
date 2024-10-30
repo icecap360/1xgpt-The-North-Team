@@ -169,8 +169,8 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
                 logits_CHW = self.compute_logits(prompt_THW)[:, :, out_t]
 
             factored_logits = rearrange(logits_CHW, "b (num_vocabs vocab_size) h w -> b vocab_size num_vocabs h w",
-                                        vocab_size=self.config.factored_vocab_size,
-                                        num_vocabs=self.config.num_factored_vocabs)
+                vocab_size=self.config.factored_vocab_size,
+                num_vocabs=self.config.num_factored_vocabs)
 
             factored_probs = torch.nn.functional.softmax(factored_logits, dim=1)
 
@@ -263,21 +263,46 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
 
         logits_CTHW = rearrange(x_next_TSC, "B T (H W) C -> B C T H W", H=self.h, W=self.w)
         return logits_CTHW
+    def compute_logits(self, x_THW, with_moe_loss=False):
+        # x_THW is for z0,...,zT while x_targets is z1,...,zT
+        x_TS = rearrange(x_THW, "B T H W -> B T (H W)")
+        x_TSC = self.token_embed(x_TS)
 
+        # additive embeddings, using the same vocab space
+        x_TSC, moe_loss = self.decoder(x_TSC + self.pos_embed_TSC)
+        x_next_TSC = self.out_x_proj(x_TSC)
+
+        logits_CTHW = rearrange(x_next_TSC, "B T (H W) C -> B C T H W", H=self.h, W=self.w)
+        if with_moe_loss:
+            return logits_CTHW, moe_loss
+        else:
+            return logits_CTHW
     def forward(self, input_ids, labels):
         T, H, W = self.config.T, self.h, self.w
         x_THW = rearrange(input_ids, "B (T H W) -> B T H W", T=T, H=H, W=W)
 
-        logits_CTHW = self.compute_logits(x_THW)
+        logits_CTHW, moe_loss= self.compute_logits(x_THW, with_moe_loss=True)
 
         labels = rearrange(labels, "B (T H W) -> B T H W", T=T, H=H, W=W)
 
         # Record the loss over masked tokens only to make it more comparable to LLM baselines
         relevant_mask = x_THW[:, 1:] == self.mask_token_id  # could also get mask of corrupted tokens by uncommenting line in `get_maskgit_collator`
         relevant_loss, relevant_acc = self.compute_loss_and_acc(logits_CTHW, labels, relevant_mask)
-
+        relevant_loss += moe_loss.squeeze()
         return ModelOutput(loss=relevant_loss, acc=relevant_acc, logits=logits_CTHW)
+    def forward(self, input_ids, labels):
+        T, H, W = self.config.T, self.h, self.w
+        x_THW = rearrange(input_ids, "B (T H W) -> B T H W", T=T, H=H, W=W)
 
+        logits_CTHW= self.compute_logits(x_THW)
+
+        labels = rearrange(labels, "B (T H W) -> B T H W", T=T, H=H, W=W)
+
+        # Record the loss over masked tokens only to make it more comparable to LLM baselines
+        relevant_mask = x_THW[:, 1:] == self.mask_token_id  # could also get mask of corrupted tokens by uncommenting line in `get_maskgit_collator`
+        relevant_loss, relevant_acc = self.compute_loss_and_acc(logits_CTHW, labels, relevant_mask)
+        return ModelOutput(loss=relevant_loss, acc=relevant_acc, logits=logits_CTHW)
+    
     def init_weights(self):
         """ Works with and without muP. """
         std = 0.02
@@ -312,6 +337,62 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
 
         return model
 
+    def load_state_dict(self, state_dict, strict = True, assign = False):
+        n_experts = 4
+        keys = list(state_dict.keys())
+        for k in keys:
+            if not '.mlp.fc' in k:
+                continue
+
+            # if 'fc1.bias' in k:
+            #     state_dict[k] = state_dict[k].repeat((2))
+            # elif 'fc1.weight' in k:
+            #     state_dict[k] = state_dict[k].repeat((2,1))
+            # elif 'fc2.weight' in k:
+            #     state_dict[k] = state_dict[k].repeat((1,2))
+            
+            # val = state_dict[k]
+            # state_dict.pop(k)
+            # layer_index = k.split('.')[2]
+            # fc_index = k.split('.')[4][2]
+            # if fc_index == '1':
+            #     fc_index = '0'
+            # weight_type = k.split('.')[-1]
+            # for i in range(n_experts):
+            #     new_k = '.'.join([
+            #         'decoder.layers',
+            #         str(layer_index),
+            #         'mlp.experts.experts',
+            #         str(i),
+            #         'net',
+            #         fc_index,
+            #         weight_type]
+            #     )
+            #     state_dict[new_k] = val
+
+
+            val = state_dict[k]
+            state_dict.pop(k)
+            if 'fc1.bias' in k:
+                val_experts = val.split(val.size(0)//n_experts, dim=0)
+            elif 'fc1.weight' in k:
+                val_experts = val.split(val.size(0)//n_experts, dim=0) 
+            elif 'fc2.weight' in k:
+                val_experts = val.split(val.size(1)//n_experts, dim=1) 
+            elif 'fc2.bias' in k:
+                val_experts = [val for _ in range(n_experts)] 
+            prefix, suffix = tuple(k.split('.mlp.'))
+            for i in range(n_experts):
+                new_k = '.'.join([
+                    prefix,
+                    'mlp.experts.experts',
+                    str(i),
+                    'net',
+                    suffix
+                    ])
+                state_dict[new_k] = val_experts[i]
+
+        return super().load_state_dict(state_dict, strict, assign)
 
 class FixedMuReadout(mup.MuReadout):
     def forward(self, x):
