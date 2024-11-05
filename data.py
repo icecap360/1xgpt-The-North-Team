@@ -41,12 +41,30 @@ class RawTokenDataset(TorchDataset):
             self.metadata = json.load(f)
 
         shape = (self.metadata["num_images"], self.metadata["s"], self.metadata["s"])
-        video_tokens_path, segment_ids_path, action_tokens_path = [data_dir / f"{name}.bin"
-                                                                   for name in ["video", "segment_ids", "actions"]]
+        video_tokens_path, segment_ids_path = [data_dir / f"{name}.bin"
+                                                                   for name in ["video", "segment_ids"]]
         token_dtype = np.dtype(self.metadata.get("token_dtype", "uint32"))
         self.data = np.memmap(video_tokens_path, dtype=token_dtype, mode="r", shape=shape)
-        # self.actions = np.memmap(action_tokens_path, dtype=np.uint16, mode="r", shape=(self.metadata["num_images"],))
+        
+        driving_command_path, joint_pos_path, l_hand_closure_path, neck_desired_path, r_hand_closure_path = [data_dir / 'actions' / f"{name}.bin" for name in ["driving_command", "joint_pos", "l_hand_closure", "neck_desired", "r_hand_closure"]]
+        self.driving_command = np.memmap(driving_command_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"], 2))
+        self.joint_pos = np.memmap(joint_pos_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"], 21))
+        self.l_hand_closure = np.memmap(l_hand_closure_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"], 1))
+        self.neck_desired = np.memmap(neck_desired_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"],1))
+        self.r_hand_closure = np.memmap(r_hand_closure_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"], 1))
 
+        self.driving_command_means = np.mean(self.driving_command, 0)
+        self.joint_pos_means = np.mean(self.joint_pos, 0)
+        self.l_hand_closure_means = np.mean(self.l_hand_closure, 0)
+        self.neck_desired_means = np.mean(self.neck_desired, 0)
+        self.r_hand_closure_means = np.mean(self.r_hand_closure, 0)
+
+        self.driving_command_stds = np.std(self.driving_command, 0)
+        self.joint_pos_stds = np.std(self.joint_pos, 0)
+        self.l_hand_closure_stds = np.std(self.l_hand_closure, 0)
+        self.neck_desired_stds = np.std(self.neck_desired, 0)
+        self.r_hand_closure_stds = np.std(self.r_hand_closure, 0)
+        
         if os.path.isfile(segment_ids_path):
             self.segment_ids = np.memmap(
                 segment_ids_path,
@@ -98,11 +116,40 @@ class RawTokenDataset(TorchDataset):
         x = torch.from_numpy((self.data[start_ind : start_ind + self.video_len + 1 : self.stride]).astype(np.int64))
         x = x.flatten()
 
+        actions = np.concat(
+            [
+                self.driving_command[start_ind : start_ind + self.video_len + 1 : self.stride], 
+                self.joint_pos[start_ind : start_ind + self.video_len + 1 : self.stride],
+                self.neck_desired[start_ind : start_ind + self.video_len + 1 : self.stride],
+                self.l_hand_closure[start_ind : start_ind + self.video_len + 1 : self.stride],
+                self.r_hand_closure[start_ind : start_ind + self.video_len + 1 : self.stride],
+            ], axis=1
+        )
+        actions -= np.concat(
+            [
+                self.driving_command_means,
+                self.joint_pos_means,
+                self.neck_desired_means,
+                self.l_hand_closure_means,
+                self.r_hand_closure_means
+            ], axis=0
+        ) 
+        actions /= np.concat(
+            [
+                self.driving_command_stds,
+                self.joint_pos_stds,
+                self.neck_desired_stds,
+                self.l_hand_closure_stds,
+                self.r_hand_closure_stds
+            ], axis=0
+        ) 
+
         attention_mask = torch.ones_like(x)
         return {
             "input_ids": x,
             "labels": x,
             "attention_mask": attention_mask,
+            "actions": actions
         }
 
 
