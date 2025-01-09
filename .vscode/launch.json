@@ -1,0 +1,63 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Train",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "train.py",
+            "console": "integratedTerminal",
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "1"
+            },
+            "args": [
+                // "--genie_config","genie/configs/magvit_n32_h8_d256.json", "--train_data_dir", "../data/train_v1.1", "--val_data_dir", "../data/val_v1.1",  "--log_name", "debug","--output_dir", "logs", "--max_eval_steps", "10", "--per_device_train_batch_size", "4", "--resume_from_checkpoint", "/pub0/qasim/1xgpt/1xgpt/checkpoints/GENIE_35M"
+                // "--genie_config","genie/configs/magvit_n32_h8_d256_v0.json", "--train_data_dir","../data/train_v1.1","--val_data_dir","../data/val_v1.1","--log_name","train_0","--output_dir","logs", "--max_eval_steps","10","--seed", "0", "--resume_from_checkpoint", "/pub0/qasim/1xgpt/1xgpt/checkpoints/GENIE_35M_v0"
+                "--genie_config","genie/configs/magvit_action_conditioned.json", "--train_data_dir", "../data/train_v1.1", "--val_data_dir", "../data/val_v1.1",  "--log_name", "debug","--output_dir", "logs", "--max_eval_steps", "10", "--per_device_train_batch_size", "2", "--no_compile", "--resume_from_checkpoint", "/pub0/qasim/1xgpt/1xgpt/checkpoints/GENIE_35M"
+
+            ],
+            "justMyCode": false
+        },
+        {
+            "name": "Generate",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "genie/generate.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--checkpoint_dir", "/pub0/qasim/1xgpt/1xgpt/checkpoints/GENIE_35M_v3" //"../data/genie_model/final_checkpt"
+            ]
+        },
+        {
+            "name": "Visualize",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "visualize.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--token_dir","../data/genie_generated"
+            ]
+        },
+        {
+            "name": "Evaluate",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "genie/evaluate.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--checkpoint_dir", "/pub0/qasim/1xgpt/1xgpt/checkpoints/GENIE_35M_v3"
+            ]
+        },
+        {
+            "name": "Merge",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "merge_models.py",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+    ]
+}
