@@ -431,7 +431,8 @@ def main():
             model.init_weights()  # might be unnecessary if `rescale_params` is True
 
         if args.resume_from_checkpoint:
-            model = STMaskGIT.from_pretrained(args.resume_from_checkpoint)
+            model_resume = STMaskGIT.from_pretrained(args.resume_from_checkpoint)
+            missing_keys, unexpected_keys = model.load_state_dict(model_resume.state_dict(), strict=False)
             resume_step = None
 
     # Optimizer. Split weights in two groups, one with weight decay and the other not.

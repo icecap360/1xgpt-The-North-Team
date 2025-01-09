@@ -11,7 +11,7 @@ from transformers.utils import ModelOutput
 
 from genie.factorization_utils import FactorizedEmbedding, factorize_labels
 from genie.config import GenieConfig
-from genie.st_transformer import STTransformerDecoder
+from genie.st_transformer import STTransformerDecoder, STATransformerDecoder
 
 
 def cosine_schedule(u):
@@ -32,20 +32,39 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         super().__init__()
         self.h = self.w = math.isqrt(config.S)
         assert self.h**2 == config.S, "Expected S to be square"
-
-        self.decoder = STTransformerDecoder(
-            num_layers=config.num_layers,
-            num_heads=config.num_heads,
-            d_model=config.d_model,
-            qkv_bias=config.qkv_bias,
-            proj_bias=config.proj_bias,
-            qk_norm=config.qk_norm,
-            use_mup=config.use_mup,
-            attn_drop=config.attn_drop,
-            mlp_ratio=config.mlp_ratio,
-            mlp_bias=config.mlp_bias,
-            mlp_drop=config.mlp_drop,
-        )
+        
+        self.action_conditioned = config.action_conditioned
+        if self.action_conditioned:
+            self.decoder = STATransformerDecoder(
+                num_layers=config.num_layers,
+                num_heads=config.num_heads,
+                d_model=config.d_model,
+                d_action=config.d_action,
+                qkv_bias=config.qkv_bias,
+                proj_bias=config.proj_bias,
+                qk_norm=config.qk_norm,
+                use_mup=config.use_mup,
+                attn_drop=config.attn_drop,
+                mlp_ratio=config.mlp_ratio,
+                mlp_bias=config.mlp_bias,
+                mlp_drop=config.mlp_drop,
+            )
+            self.pos_embed_TA = torch.nn.Parameter(torch.zeros(1, config.T, config.d_action))
+            self.action_loss = nn.MSELoss()
+        else:
+            self.decoder = STTransformerDecoder(
+                num_layers=config.num_layers,
+                num_heads=config.num_heads,
+                d_model=config.d_model,
+                qkv_bias=config.qkv_bias,
+                proj_bias=config.proj_bias,
+                qk_norm=config.qk_norm,
+                use_mup=config.use_mup,
+                attn_drop=config.attn_drop,
+                mlp_ratio=config.mlp_ratio,
+                mlp_bias=config.mlp_bias,
+                mlp_drop=config.mlp_drop,
+            )
 
         self.pos_embed_TSC = torch.nn.Parameter(torch.zeros(1, config.T, config.S, config.d_model))
         self.mask_token_id = config.image_vocab_size
@@ -252,29 +271,43 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         # only optimize on the masked/noised logits?
         return relevant_loss, relevant_acc
 
-    def compute_logits(self, x_THW):
+    def compute_logits(self, x_THW, x_TA=None):
         # x_THW is for z0,...,zT while x_targets is z1,...,zT
         x_TS = rearrange(x_THW, "B T H W -> B T (H W)")
         x_TSC = self.token_embed(x_TS)
 
         # additive embeddings, using the same vocab space
-        x_TSC = self.decoder(x_TSC + self.pos_embed_TSC)
+        if self.action_conditioned:
+            x_TSC, x_A = self.decoder(x_TSC + self.pos_embed_TSC, x_TA, self.pos_embed_TA)
+        else:
+            x_TSC = self.decoder(x_TSC + self.pos_embed_TSC)
         x_next_TSC = self.out_x_proj(x_TSC)
 
         logits_CTHW = rearrange(x_next_TSC, "B T (H W) C -> B C T H W", H=self.h, W=self.w)
-        return logits_CTHW
 
-    def forward(self, input_ids, labels):
+        if self.action_conditioned:
+            return logits_CTHW, x_A
+        else:
+            return logits_CTHW
+
+    def forward(self, input_ids, labels, actions=None, labels_actions=None):
         T, H, W = self.config.T, self.h, self.w
         x_THW = rearrange(input_ids, "B (T H W) -> B T H W", T=T, H=H, W=W)
 
-        logits_CTHW = self.compute_logits(x_THW)
+        if self.action_conditioned:
+            logits_CTHW, pred_action = self.compute_logits(x_THW, actions)
+            action_loss = self.action_loss(pred_action, labels_actions)
+        else:
+            logits_CTHW = self.compute_logits(x_THW)
 
         labels = rearrange(labels, "B (T H W) -> B T H W", T=T, H=H, W=W)
 
         # Record the loss over masked tokens only to make it more comparable to LLM baselines
         relevant_mask = x_THW[:, 1:] == self.mask_token_id  # could also get mask of corrupted tokens by uncommenting line in `get_maskgit_collator`
         relevant_loss, relevant_acc = self.compute_loss_and_acc(logits_CTHW, labels, relevant_mask)
+
+        if self.action_conditioned:
+            relevant_loss += action_loss
 
         return ModelOutput(loss=relevant_loss, acc=relevant_acc, logits=logits_CTHW)
 

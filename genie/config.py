@@ -9,6 +9,7 @@ class GenieConfig:
     num_layers: int
     num_heads: int
     d_model: int
+    d_action: int = 26
     T: int = 16  # temporal sequence length
     S: int = 256  # spatial sequence length, e.g. 256 for 16x16
     image_vocab_size: int = 262144  # image_vocab_size: number of distinct image tokens;
@@ -31,7 +32,8 @@ class GenieConfig:
     proj_bias: bool = True
     attn_drop: float = 0.0
     qk_norm: bool = True
-
+    action_conditioned: bool = False
+    
     # MLP
     mlp_ratio: float = 4.0
     mlp_drop: float = 0.0
