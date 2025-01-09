@@ -22,7 +22,8 @@ class RawTokenDataset(TorchDataset):
         window_size,
         stride=1,
         filter_interrupts=True,
-        filter_overlaps=False
+        filter_overlaps=False,
+        with_actions=False,
     ):
         """
         Args:
@@ -46,24 +47,26 @@ class RawTokenDataset(TorchDataset):
         token_dtype = np.dtype(self.metadata.get("token_dtype", "uint32"))
         self.data = np.memmap(video_tokens_path, dtype=token_dtype, mode="r", shape=shape)
         
-        driving_command_path, joint_pos_path, l_hand_closure_path, neck_desired_path, r_hand_closure_path = [data_dir / 'actions' / f"{name}.bin" for name in ["driving_command", "joint_pos", "l_hand_closure", "neck_desired", "r_hand_closure"]]
-        self.driving_command = np.memmap(driving_command_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"], 2))
-        self.joint_pos = np.memmap(joint_pos_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"], 21))
-        self.l_hand_closure = np.memmap(l_hand_closure_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"], 1))
-        self.neck_desired = np.memmap(neck_desired_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"],1))
-        self.r_hand_closure = np.memmap(r_hand_closure_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"], 1))
+        self.with_actions = with_actions
+        if with_actions:
+            driving_command_path, joint_pos_path, l_hand_closure_path, neck_desired_path, r_hand_closure_path = [data_dir / 'actions' / f"{name}.bin" for name in ["driving_command", "joint_pos", "l_hand_closure", "neck_desired", "r_hand_closure"]]
+            self.driving_command = np.memmap(driving_command_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"], 2))
+            self.joint_pos = np.memmap(joint_pos_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"], 21))
+            self.l_hand_closure = np.memmap(l_hand_closure_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"], 1))
+            self.neck_desired = np.memmap(neck_desired_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"],1))
+            self.r_hand_closure = np.memmap(r_hand_closure_path, dtype=np.float32, mode="r", shape=(self.metadata["num_images"], 1))
 
-        self.driving_command_means = np.mean(self.driving_command, 0)
-        self.joint_pos_means = np.mean(self.joint_pos, 0)
-        self.l_hand_closure_means = np.mean(self.l_hand_closure, 0)
-        self.neck_desired_means = np.mean(self.neck_desired, 0)
-        self.r_hand_closure_means = np.mean(self.r_hand_closure, 0)
+            self.driving_command_means = np.mean(self.driving_command, 0)
+            self.joint_pos_means = np.mean(self.joint_pos, 0)
+            self.l_hand_closure_means = np.mean(self.l_hand_closure, 0)
+            self.neck_desired_means = np.mean(self.neck_desired, 0)
+            self.r_hand_closure_means = np.mean(self.r_hand_closure, 0)
 
-        self.driving_command_stds = np.std(self.driving_command, 0)
-        self.joint_pos_stds = np.std(self.joint_pos, 0)
-        self.l_hand_closure_stds = np.std(self.l_hand_closure, 0)
-        self.neck_desired_stds = np.std(self.neck_desired, 0)
-        self.r_hand_closure_stds = np.std(self.r_hand_closure, 0)
+            self.driving_command_stds = np.std(self.driving_command, 0)
+            self.joint_pos_stds = np.std(self.joint_pos, 0)
+            self.l_hand_closure_stds = np.std(self.l_hand_closure, 0)
+            self.neck_desired_stds = np.std(self.neck_desired, 0)
+            self.r_hand_closure_stds = np.std(self.r_hand_closure, 0)
         
         if os.path.isfile(segment_ids_path):
             self.segment_ids = np.memmap(
@@ -116,41 +119,54 @@ class RawTokenDataset(TorchDataset):
         x = torch.from_numpy((self.data[start_ind : start_ind + self.video_len + 1 : self.stride]).astype(np.int64))
         x = x.flatten()
 
-        actions = np.concat(
-            [
-                self.driving_command[start_ind : start_ind + self.video_len + 1 : self.stride], 
-                self.joint_pos[start_ind : start_ind + self.video_len + 1 : self.stride],
-                self.neck_desired[start_ind : start_ind + self.video_len + 1 : self.stride],
-                self.l_hand_closure[start_ind : start_ind + self.video_len + 1 : self.stride],
-                self.r_hand_closure[start_ind : start_ind + self.video_len + 1 : self.stride],
-            ], axis=1
-        )
-        actions -= np.concat(
-            [
-                self.driving_command_means,
-                self.joint_pos_means,
-                self.neck_desired_means,
-                self.l_hand_closure_means,
-                self.r_hand_closure_means
-            ], axis=0
-        ) 
-        actions /= np.concat(
-            [
-                self.driving_command_stds,
-                self.joint_pos_stds,
-                self.neck_desired_stds,
-                self.l_hand_closure_stds,
-                self.r_hand_closure_stds
-            ], axis=0
-        ) 
-
-        attention_mask = torch.ones_like(x)
-        return {
-            "input_ids": x,
-            "labels": x,
-            "attention_mask": attention_mask,
-            "actions": actions
-        }
+        if self.with_actions:
+            actions = np.concatenate(
+                [
+                    self.driving_command[start_ind : start_ind + self.video_len + 1 : self.stride], 
+                    self.joint_pos[start_ind : start_ind + self.video_len + 1 : self.stride],
+                    self.neck_desired[start_ind : start_ind + self.video_len + 1 : self.stride],
+                    self.l_hand_closure[start_ind : start_ind + self.video_len + 1 : self.stride],
+                    self.r_hand_closure[start_ind : start_ind + self.video_len + 1 : self.stride],
+                ], axis=1
+            )
+            actions -= np.concatenate(
+                [
+                    self.driving_command_means,
+                    self.joint_pos_means,
+                    self.neck_desired_means,
+                    self.l_hand_closure_means,
+                    self.r_hand_closure_means
+                ], axis=0
+            ) 
+            actions /= np.concatenate(
+                [
+                    self.driving_command_stds,
+                    self.joint_pos_stds,
+                    self.neck_desired_stds,
+                    self.l_hand_closure_stds,
+                    self.r_hand_closure_stds
+                ], axis=0
+            ) 
+            actions = torch.from_numpy(actions)
+            labels_actions = actions[-1]
+            actions = actions[:-1]
+            attention_mask = torch.ones_like(x)
+            return {
+                "input_ids": x,
+                "labels": x,
+                "attention_mask": attention_mask,
+                "labels_actions": labels_actions,
+                "actions": actions
+            }
+        else:
+            attention_mask = torch.ones_like(x)
+            return {
+                "input_ids": x,
+                "labels": x,
+                "attention_mask": attention_mask,
+                # "labels_actions": labels_actions,
+                # "actions": actions
+                }
 
 
 def get_maskgit_collator(config: GenieConfig):
@@ -208,8 +224,13 @@ def get_maskgit_collator(config: GenieConfig):
         x_THW = unfactorize_token_ids(x_THWC, config.num_factored_vocabs, config.factored_vocab_size)
         x_THW[:, first_masked_frame:][mask] = mask_token_id
 
+        actions = torch.stack([ex["actions"] for ex in features])
+        labels_actions = torch.stack([ex["labels_actions"] for ex in features])
+
         return {
             "input_ids": rearrange(x_THW, "b t h w -> b (t h w)"),
+            "actions" : actions,
+            "labels_actions": labels_actions,
             "labels": rearrange(labels, "b t h w -> b (t h w)"),
         }
 
