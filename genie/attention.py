@@ -112,11 +112,16 @@ class BasicCrossAttention(nn.Module):
             self.norm = nn.LayerNorm(self.head_dim, eps=1e-05)
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor, causal: bool = False) -> torch.Tensor:
-        B, N, C = x1.shape
+        B, N1, C = x1.shape
+        _, N2, _ = x2.shape
 
-        q = self.q(x1)
-        k = self.k(x2)
-        v = self.v(x2)
+        q = self.q(x1) #B, N, C
+        k = self.k(x2) #B, S, C
+        v = self.v(x2) #B, S, C
+
+        q = q.reshape(B, N1, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # (B, num_heads, N, head_dim)
+        k = k.reshape(B, N2, self.num_heads, self.head_dim).permute(0, 2, 1, 3) # (B, num_heads, N2, head_dim)
+        v = v.reshape(B, N2, self.num_heads, self.head_dim).permute(0, 2, 1, 3) # (B, num_heads, N2, head_dim)
 
         if self.qk_norm:
             q = self.norm(q)
@@ -127,7 +132,6 @@ class BasicCrossAttention(nn.Module):
         q *= self.scale
         attn = q @ k.transpose(-2, -1)
         
-
         if causal:
             mask_value = -torch.finfo(attn.dtype).max
             i, j = attn.shape[-2:]            
@@ -136,7 +140,7 @@ class BasicCrossAttention(nn.Module):
 
         attn = attn.softmax(dim=-1)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = (attn @ v).permute(0, 2, 1, 3).reshape(B, N1, C)
         x = self.proj(x)
         return x
 
