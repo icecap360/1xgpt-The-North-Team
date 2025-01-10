@@ -69,7 +69,7 @@ class STBlock(nn.Module):
         
     def forward(self, x_TSC: Tensor) -> Tensor:
         # Process attention spatially
-        T, S = x_TSC.size(1), x_TSC.size(2)
+        B, T, S = x_TSC.size(0), x_TSC.size(1), x_TSC.size(2)
         x_SC = rearrange(x_TSC, 'B T S C -> (B T) S C')
         x_SC = x_SC + self.spatial_attn(self.norm1(x_SC))
 
@@ -77,11 +77,20 @@ class STBlock(nn.Module):
         x_TC = rearrange(x_SC, '(B T) S C -> (B S) T C', T=T)
         x_TC = x_TC + self.temporal_attn(x_TC, causal=True)
 
+        # Process attentions actions
+        x_TA = x_TA + self.action_attn(x_TA, casual=True)
+        #Apply the MLP on actions
+        x_TA = x_TA + self.mlp_actions(self.norm_actions(x_TA))
+
+        # Process cross-attention
+        x_C = rearrange(x_TC, '(B S) T C -> B (S T) C', B=B, T=T)
+        x_C = x_C + self.action_crossattn(x_C, x_TA)
+        x_TC = rearrange(x_C, 'B (T S) C -> (B S) T C', B=B, T=T)
+
         # Apply the MLP
         x_TC = x_TC + self.mlp(self.norm2(x_TC))
         x_TSC = rearrange(x_TC, '(B S) T C -> B T S C', S=S)
         return x_TSC
-
 
 class STTransformerDecoder(nn.Module):
     def __init__(
