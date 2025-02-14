@@ -22,7 +22,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Generates samples (as tokens) from GENIE model. "
                                                  "Optionally visualizes these tokens as GIFs or comics.")
     parser.add_argument(
-        "--val_data_dir", type=str, default="../data/val_v1.1",
+        "--val_data_dir", type=str, default="data/val_v1.1",
         help="A directory with video data, should have a `metadata.json` and `video.bin` We generate using the first frames of this dataset."
     )
     parser.add_argument(
@@ -55,6 +55,9 @@ def parse_args():
         "--temperature", type=float, default=0,
         help="Sampling temperature. If `temperature` <= 1e-8, will do greedy sampling."
     )
+    parser.add_argument(
+        "--action_conditioned", action="store_true", default=0,
+    )
 
     return parser.parse_args()
 
@@ -63,20 +66,28 @@ def parse_args():
 def main():
     args = parse_args()
     assert args.num_prompt_frames <= args.window_size
-    val_dataset = RawTokenDataset(args.val_data_dir, window_size=args.window_size, stride=STRIDE)
+    val_dataset = RawTokenDataset(args.val_data_dir, window_size=args.window_size, stride=STRIDE, with_actions=args.action_conditioned)
     latent_side_len = val_dataset.metadata["s"]
 
     # Get single example
     example_THW = val_dataset[args.example_ind]["input_ids"].reshape(1, args.window_size, latent_side_len,
                                                                      latent_side_len).to("cuda")
+    if args.action_conditioned:
+        example_TA = val_dataset[args.example_ind]["actions"]
+        # example_A = val_dataset[args.example_ind]["action"].reshape(1, args.window_size, latent_side_len, latent_side_len).to("cuda")
 
     # Load the model checkpoint
-    model = STMaskGIT.from_pretrained(args.checkpoint_dir).to("cuda")
+    # config = GenieConfig.from_pretrained(args.genie_config)
+    model = STMaskGIT.from_pretrained(args.checkpoint_dir, log_activations=False, activation_log_dir="./").to("cuda")
     model.eval()
 
     samples = []
     prompt_THW = example_THW.clone()
     prompt_THW[:, args.num_prompt_frames:] = model.mask_token_id
+
+    if args.action_conditioned:
+        prompt_TA = example_TA.clone()
+        prompt_TA[:, args.num_prompt_frames:] = model.mask_token_id 
 
     for timestep in range(args.num_prompt_frames, args.window_size):
         # Teacher-forced, maskgit generation
@@ -85,9 +96,18 @@ def main():
             # Masked prediction for this timestep only, after which we provide ground-truth
             prompt_THW[:, timestep:] = model.image_mask_token
 
-        samples_HW, _ = model.maskgit_generate(
-            prompt_THW, out_t=timestep, maskgit_steps=args.maskgit_steps, temperature=args.temperature,
-        )
+            if args.action_conditioned:
+                prompt_TA = example_TA.clone()
+                prompt_TA[:, timestep:] = model.mask_token_id 
+
+        if args.action_conditioned:
+            samples_HW, _ = model.maskgit_generate(
+                prompt_THW, out_t=timestep, maskgit_steps=args.maskgit_steps, temperature=args.temperature, prompt_TA=prompt_TA,
+            )
+        else:
+            samples_HW, _ = model.maskgit_generate(
+                prompt_THW, out_t=timestep, maskgit_steps=args.maskgit_steps, temperature=args.temperature,
+            )
 
         samples.append(samples_HW)
         if not args.teacher_force_time:

@@ -231,6 +231,17 @@ def parse_args():
         help="If specified, will not compile the model."
     )
 
+    parser.add_argument(
+        "--log_activations",
+        action="store_true",
+        help="If specified, log activations"
+    )
+
+    parser.add_argument(
+        "--action_conditioned",
+        action="store_true",
+    )
+
     args = parser.parse_args()
     now = datetime.datetime.now()
     timestamp = now.strftime("%m-%d-%H-%M")
@@ -358,10 +369,10 @@ def main():
     accelerator.wait_for_everyone()
 
     train_dataset = RawTokenDataset(args.train_data_dir, window_size=args.window_size,
-                                    stride=args.stride, filter_overlaps=args.filter_overlaps)
+                                    stride=args.stride, filter_overlaps=args.filter_overlaps, with_actions=args.action_conditioned)
     if not args.overfit_first_batch:
         eval_dataset = RawTokenDataset(args.val_data_dir, window_size=args.window_size,
-                                       stride=args.stride, filter_overlaps=True)
+                                       stride=args.stride, filter_overlaps=True, with_actions=args.action_conditioned)
     else:
         train_dataset.valid_start_inds = train_dataset.valid_start_inds[:args.per_device_train_batch_size
                                                                          * args.gradient_accumulation_steps
@@ -424,14 +435,14 @@ def main():
         config.image_vocab_size = vocab_size
         config.T = args.window_size
         config.S = latent_side_len**2
-        model = STMaskGIT(config)
+        model = STMaskGIT(config, log_activations=args.log_activations, activation_log_dir=args.log_name + "/activations")
 
         if args.mu_transfer:
             model.set_mup_shapes(rescale_params=True)
             model.init_weights()  # might be unnecessary if `rescale_params` is True
 
         if args.resume_from_checkpoint:
-            model_resume = STMaskGIT.from_pretrained(args.resume_from_checkpoint)
+            model_resume = STMaskGIT.from_pretrained(args.resume_from_checkpoint, log_activations=args.log_activations, activation_log_dir=args.log_name + "/activations")
             missing_keys, unexpected_keys = model.load_state_dict(model_resume.state_dict(), strict=False)
             resume_step = None
 
@@ -745,6 +756,7 @@ def main():
 
     accelerator.end_training()
     save_checkpoint(model, accelerator, args, f"final_checkpt")
+    # model.activation_logger.save_all_activations()
 
 
 if __name__ == "__main__":

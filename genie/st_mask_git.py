@@ -13,6 +13,86 @@ from genie.factorization_utils import FactorizedEmbedding, factorize_labels
 from genie.config import GenieConfig
 from genie.st_transformer import STTransformerDecoder, STATransformerDecoder
 
+import os
+import json
+import numpy as np
+import matplotlib.pyplot as plt
+from collections import defaultdict
+
+class ActivationLogger:
+    def __init__(self, model, log_dir, log_interval=100):
+        self.model = model
+        self.log_dir = log_dir
+        self.log_interval = log_interval
+        # self.activations = defaultdict(list)
+        self.mlp_actions_activations = defaultdict(list)
+        self.mlp_temporal_activations = defaultdict(list)
+        self.cur_step = 0
+
+        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(log_dir + "/actions", exist_ok=True)
+        os.makedirs(log_dir + "/temporal", exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
+
+        self.layers = list(self.model.named_modules())
+
+        self.first_layer_name = 'layers.0'
+        self.last_layer_name = 'layers.31'
+
+        for name, module in self.model.named_modules():
+            if isinstance(module, (torch.nn.ReLU, torch.nn.GELU)):
+                if name.startswith(self.first_layer_name) or name.startswith(self.last_layer_name):
+                    module.register_forward_hook(self.save_activation(name))
+
+    def save_activation(self, name):
+        def hook(module, input, output):
+            if self.cur_step % self.log_interval == 0:
+                # act_array = output.detach().cpu().numpy()
+                if 'mlp_actions' in name:
+                    self.mlp_actions_activations[name].append(output.detach().cpu().numpy())
+                elif 'mlp' in name:
+                    self.mlp_temporal_activations[name].append(output.detach().cpu().numpy())
+
+        return hook
+
+    def save_all_activations(self):
+        for name, activations in self.mlp_actions_activations.items():
+            log_dir=self.log_dir + "/actions"
+            act_array = np.concatenate(activations, axis=0)
+
+            flattened_act_array = act_array.flatten()
+
+            plt.figure()
+            plt.hist(flattened_act_array, bins=50)
+            plt.title(f'{name} Activation Histogram')
+            plt.savefig(os.path.join(log_dir, f'{name}_hist.png'))
+            plt.close()
+
+            json_data = {name: flattened_act_array.tolist()}
+            with open(os.path.join(log_dir, f'{name}_acts.json'), 'w') as f:
+                json.dump(json_data, f)
+            np.save(os.path.join(log_dir, f'{name}_acts.npy'), act_array)
+        
+        for name, activations in self.mlp_temporal_activations.items():
+            log_dir=self.log_dir + "/temporal"
+            act_array = np.concatenate(activations, axis=0)
+
+            flattened_act_array = act_array.flatten()
+
+            plt.figure()
+            plt.hist(flattened_act_array, bins=50)
+            plt.title(f'{name} Activation Histogram')
+            plt.savefig(os.path.join(log_dir, f'{name}_hist.png'))
+            plt.close()
+
+            json_data = {name: flattened_act_array.tolist()}
+            with open(os.path.join(log_dir, f'{name}_acts.json'), 'w') as f:
+                json.dump(json_data, f)
+            np.save(os.path.join(log_dir, f'{name}_acts.npy'), act_array)
+
+    def step(self):
+        self.cur_step += 1
+
 
 def cosine_schedule(u):
     """ u in [0, 1] """
@@ -28,7 +108,7 @@ def cosine_schedule(u):
 
 class STMaskGIT(nn.Module, PyTorchModelHubMixin):
     # Next-Token prediction as done in https://arxiv.org/pdf/2402.15391.pdf
-    def __init__(self, config: GenieConfig):
+    def __init__(self, config: GenieConfig, log_activations, activation_log_dir):
         super().__init__()
         self.h = self.w = math.isqrt(config.S)
         assert self.h**2 == config.S, "Expected S to be square"
@@ -51,6 +131,11 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
             )
             self.pos_embed_TA = torch.nn.Parameter(torch.zeros(1, config.T, config.d_action))
             self.action_loss = nn.MSELoss()
+            
+            self.activation_logger = None
+            if log_activations:
+                self.activation_logger = ActivationLogger(self.decoder, activation_log_dir, log_interval=1)
+
         else:
             self.decoder = STTransformerDecoder(
                 num_layers=config.num_layers,
@@ -146,6 +231,7 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         maskgit_steps: int = 1,
         temperature: float = 0.0,
         unmask_mode: str = "random",
+        prompt_TA: torch.LongTensor = None,
     ) -> tuple[torch.LongTensor, torch.FloatTensor]:
         """
         Performs MaskGIT-style inference to predict frame `out_t`.
@@ -178,14 +264,27 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
 
         # this will be modified in place on each iteration of this loop
         unmasked = self.init_mask(prompt_THW)
+        
+        if prompt_TA is not None:
+            logits_CTHW, pred_action = self.compute_logits(prompt_THW, prompt_TA)
+        else:
+            logits_CTHW = self.compute_logits(prompt_THW)
+        
+        print (logits_CTHW.shape, pred_action.shape)
 
-        logits_CTHW = self.compute_logits(prompt_THW)
         logits_CHW = logits_CTHW[:, :, out_t]
         orig_logits_CHW = logits_CHW.clone()  # Return these original logits, not logits after partially sampling.
+        if prompt_TA:
+            pred_action = pred_action[:, :, out_t]
+            orig_logits_action = pred_action.clone()
+
         for step in tqdm(range(maskgit_steps)):
             # Perform a single maskgit step (cosine schedule), updating unmasked in-place
             if step > 0:  # recompute logits with updated prompt
-                logits_CHW = self.compute_logits(prompt_THW)[:, :, out_t]
+                if prompt_TA is not None:
+                    logits_CHW, pred_action = self.compute_logits(prompt_THW, prompt_TA)[:, :, out_t]
+                else:
+                    logits_CHW = self.compute_logits(prompt_THW)[:, :, out_t]
 
             factored_logits = rearrange(logits_CHW, "b (num_vocabs vocab_size) h w -> b vocab_size num_vocabs h w",
                                         vocab_size=self.config.factored_vocab_size,
@@ -240,6 +339,8 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
 
             # feed back to iteratively decode
             prompt_THW[:, out_t] = samples_HW
+            if prompt_TA:
+                prompt_TA[:, out_t] = pred_action 
 
         # Return the final sample and logits
         return samples_HW, rearrange(
@@ -308,6 +409,9 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
 
         if self.action_conditioned:
             relevant_loss += action_loss
+        
+        if self.activation_logger:
+            self.activation_logger.step()
 
         return ModelOutput(loss=relevant_loss, acc=relevant_acc, logits=logits_CTHW)
 
@@ -328,11 +432,11 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
                 if module.padding_idx is not None:
                     module.weight.data[module.padding_idx].zero_()
 
-    def set_mup_shapes(self, rescale_params=False):
+    def set_mup_shapes(self, rescale_params=False, log_activations=False, activation_log_dir=None):
         base_config = self.config.shallow_copy()
         base_config.num_heads = 8
         base_config.d_model = 256  # currently hardcoding to this shape
-        base_model = STMaskGIT(base_config)
+        base_model = STMaskGIT(base_config, log_activations, activation_log_dir)
 
         mup.set_base_shapes(self, base_model, rescale_params=rescale_params)
 
@@ -341,7 +445,7 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         """ Extra logic for muP. """
         model = super().from_pretrained(*args, **kwargs)
         if model.config.use_mup:
-            model.set_mup_shapes(rescale_params=False)
+            model.set_mup_shapes(rescale_params=False, **kwargs)
 
         return model
 

@@ -163,7 +163,7 @@ class MemoryEfficientCrossAttention(BasicSelfAttention):
         x = self.proj(x)
         return x
 
-import genie.nGPT as nGPT
+# import genie.nGPT as nGPT
 if XFORMERS_DISABLED:
     SelfAttention = BasicSelfAttention
     CrossAttention = BasicCrossAttention

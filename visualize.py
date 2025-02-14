@@ -92,7 +92,7 @@ def rescale_magvit_output(magvit_output):
     return clipped_output
 
 
-def decode_latents_wrapper(batch_size=16, tokenizer_ckpt="../data/magvit2.ckpt", max_images=None, device='cuda'):
+def decode_latents_wrapper(batch_size=16, tokenizer_ckpt="/home/aditya/1xgpt-The-North-Team/data/magvit2.ckpt", max_images=None, device='cuda'):
     dtype = torch.bfloat16
 
     model_config = VQConfig()

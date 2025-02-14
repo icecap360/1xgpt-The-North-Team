@@ -38,6 +38,7 @@ class RawTokenDataset(TorchDataset):
                 If True, will filter out examples so that each frame appears at most once in the dataset.
         """
         data_dir = Path(data_dir)
+
         with open(data_dir / "metadata.json") as f:
             self.metadata = json.load(f)
 
