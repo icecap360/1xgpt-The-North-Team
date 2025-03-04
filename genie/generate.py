@@ -73,8 +73,11 @@ def main():
     example_THW = val_dataset[args.example_ind]["input_ids"].reshape(1, args.window_size, latent_side_len,
                                                                      latent_side_len).to("cuda")
     if args.action_conditioned:
-        example_TA = val_dataset[args.example_ind]["actions"]
+        example_TA = torch.concat([val_dataset[args.example_ind]["actions"], val_dataset[args.example_ind]["labels_actions"].unsqueeze(0)], dim=0).unsqueeze(0)
+        # example_TA = val_dataset[args.example_ind]["actions"].unsqueeze(0)
         # example_A = val_dataset[args.example_ind]["action"].reshape(1, args.window_size, latent_side_len, latent_side_len).to("cuda")
+    
+    # print (example_THW.shape, example_TA.shape)
 
     # Load the model checkpoint
     # config = GenieConfig.from_pretrained(args.genie_config)
@@ -87,7 +90,11 @@ def main():
 
     if args.action_conditioned:
         prompt_TA = example_TA.clone()
-        prompt_TA[:, args.num_prompt_frames:] = model.mask_token_id 
+        # prompt_TA[:, args.num_prompt_frames:] = torch.zeros(args.window_size - args.num_prompt_frames, 26).unsqueeze(0)
+        prompt_TA[:, args.num_prompt_frames:] = model.decoder.future_action_token.unsqueeze(0)
+        # prompt_TA[:, args.num_prompt_frames:] = model.mask_token_id
+        prompt_TA = prompt_TA.to(prompt_THW.device)
+    
 
     for timestep in range(args.num_prompt_frames, args.window_size):
         # Teacher-forced, maskgit generation
@@ -98,10 +105,10 @@ def main():
 
             if args.action_conditioned:
                 prompt_TA = example_TA.clone()
-                prompt_TA[:, timestep:] = model.mask_token_id 
+                prompt_TA[:, timestep:] = torch.zeros(args.window_size - args.num_prompt_frames, 26).unsqueeze(0)
 
         if args.action_conditioned:
-            samples_HW, _ = model.maskgit_generate(
+            samples_HW, pred_action, _ = model.maskgit_generate(
                 prompt_THW, out_t=timestep, maskgit_steps=args.maskgit_steps, temperature=args.temperature, prompt_TA=prompt_TA,
             )
         else:
@@ -113,6 +120,10 @@ def main():
         if not args.teacher_force_time:
             # autoregressive
             prompt_THW[:, timestep] = samples_HW
+
+            if args.action_conditioned:
+                # prompt_TA = example_TA.clone()
+                prompt_TA[:, timestep] = pred_action
 
     outputs = torch.stack(samples, dim=1)
     # prepend prompt sequence

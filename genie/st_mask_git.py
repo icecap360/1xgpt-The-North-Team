@@ -191,6 +191,8 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         assert max_new_tokens % self.config.S == 0, "Expecting `max_new_tokens` to be a multiple of `self.config.S`."
         num_new_frames = max_new_tokens // self.config.S
 
+        print (f"Generating {num_new_frames} new frames...")
+
         inputs_THW = rearrange(input_ids.clone(), "b (t h w) -> b t h w", h=self.h, w=self.w)
         inputs_masked_THW = torch.cat([
             inputs_THW,
@@ -264,25 +266,30 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
 
         # this will be modified in place on each iteration of this loop
         unmasked = self.init_mask(prompt_THW)
+
+        # print (prompt_THW.shape, prompt_TA.shape)
         
         if prompt_TA is not None:
-            logits_CTHW, pred_action = self.compute_logits(prompt_THW, prompt_TA)
+            logits_CTHW, pred_action = self.compute_logits(prompt_THW, prompt_TA[:, :-1, :])
+            # logits_CTHW, pred_action = self.compute_logits(prompt_THW, prompt_TA)
         else:
             logits_CTHW = self.compute_logits(prompt_THW)
         
-        print (logits_CTHW.shape, pred_action.shape)
+        # print (logits_CTHW.shape, pred_action.shape)
 
         logits_CHW = logits_CTHW[:, :, out_t]
         orig_logits_CHW = logits_CHW.clone()  # Return these original logits, not logits after partially sampling.
-        if prompt_TA:
-            pred_action = pred_action[:, :, out_t]
-            orig_logits_action = pred_action.clone()
+        # if prompt_TA is not None:
+        #     pred_action = pred_action[:, :, out_t]
+        #     orig_logits_action = pred_action.clone()
 
         for step in tqdm(range(maskgit_steps)):
             # Perform a single maskgit step (cosine schedule), updating unmasked in-place
             if step > 0:  # recompute logits with updated prompt
                 if prompt_TA is not None:
-                    logits_CHW, pred_action = self.compute_logits(prompt_THW, prompt_TA)[:, :, out_t]
+                    logits_CHW, pred_action = self.compute_logits(prompt_THW, prompt_TA[:, :-1, :])
+                    # logits_CHW, pred_action = self.compute_logits(prompt_THW, prompt_TA)
+                    logits_CHW = logits_CTHW[:, :, out_t]
                 else:
                     logits_CHW = self.compute_logits(prompt_THW)[:, :, out_t]
 
@@ -338,11 +345,19 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
             samples_HW = samples_flat.reshape(-1, h, w)
 
             # feed back to iteratively decode
+            # print (prompt_THW.shape)
+            # print (prompt_TA.shape)
             prompt_THW[:, out_t] = samples_HW
-            if prompt_TA:
+            if prompt_TA is not None:
                 prompt_TA[:, out_t] = pred_action 
 
         # Return the final sample and logits
+        if prompt_TA is not None:
+            return samples_HW, pred_action, rearrange(
+            orig_logits_CHW, "B (num_vocabs vocab_size) H W -> B vocab_size num_vocabs H W",
+            vocab_size=self.config.factored_vocab_size, num_vocabs=self.config.num_factored_vocabs, H=h, W=w
+            )
+            
         return samples_HW, rearrange(
             orig_logits_CHW, "B (num_vocabs vocab_size) H W -> B vocab_size num_vocabs H W",
             vocab_size=self.config.factored_vocab_size, num_vocabs=self.config.num_factored_vocabs, H=h, W=w
