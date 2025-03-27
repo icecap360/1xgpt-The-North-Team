@@ -101,6 +101,8 @@ def main():
                 prompt_TA[:, timestep:] = model.mask_token_id 
 
         if args.action_conditioned:
+            print (prompt_THW.shape)
+            print (prompt_TA.shape)
             samples_HW, _ = model.maskgit_generate(
                 prompt_THW, out_t=timestep, maskgit_steps=args.maskgit_steps, temperature=args.temperature, prompt_TA=prompt_TA,
             )

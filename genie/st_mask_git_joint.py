@@ -13,6 +13,8 @@ from genie.factorization_utils import FactorizedEmbedding, factorize_labels
 from genie.config import GenieConfig
 from genie.st_transformer import STTransformerDecoder, STATransformerDecoder
 
+from lam.lam import LatentActionModel
+
 import os
 import json
 import numpy as np
@@ -151,22 +153,8 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
                 mlp_bias=config.mlp_bias,
                 mlp_drop=config.mlp_drop,
             )
-            self.pos_embed_TA = torch.nn.Parameter(torch.zeros(1, config.T, config.d_model))
             self.action_loss = nn.MSELoss()
-
-            self.action_mask_tokens = torch.nn.Parameter(torch.zeros(1, config.T, 1, config.d_model))
-            self.action_encoder = nn.Sequential(
-                nn.Linear(config.d_action, config.d_model),
-                nn.ReLU(),
-                Mlp(config.d_model),
-                nn.LayerNorm(config.d_model, eps=1e-05)
-            )
-            self.action_decoder = nn.Sequential(
-                nn.Linear(config.d_model, config.d_action),
-                nn.ReLU(),
-                Mlp(config.d_action),
-                nn.LayerNorm(config.d_action, eps=1e-05)
-            )
+            self.lam = LatentActionModel(config)
             
             self.activation_logger = None
             if log_activations:
@@ -430,57 +418,13 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
 
         if self.action_conditioned:
             if not out_t:
-
-                x_TA = self.action_encoder(x_TA)
-
-                if self.predict_actions:
-                    # print (x_TSC.shape, x_TA.shape)
-                    T, S = x_TSC.shape[1], x_TSC.shape[2]
-                    action_token_size = 64
-                    x_TA += self.pos_embed_TA
-                    action_condition = x_TA[:, :T, None].repeat(
-                        1, 1, action_token_size, 1
-                    )  # B, 16, 64, 256
-                    # print (action_condition.shape) # 4, 16, 64, 256
-                    if self.relevant_action_mask is not None:
-                        # action_condition += self.pos_embed_TA
-                        action_condition = (
-                            self.relevant_action_mask[:, :T] * self.action_mask_tokens[:, :T]
-                            + (1 - self.relevant_action_mask[:, :T]) * action_condition[:, :T]
-                        )
-                    x_TSC = torch.concat((x_TSC + self.pos_embed_TSC, action_condition), dim=2) 
-                    x_TSC = self.decoder(x_TSC, x_TA)
-                    x_TA = self.action_decoder(x_TSC[:, :, -action_token_size:, :].mean(dim=2))
-                    x_TSC = x_TSC[:, :, :S, :]
-                else:
-                    x_TSC = self.decoder(x_TSC + self.pos_embed_TSC, x_TA + self.pos_embed_TA)
+                x_TSC = self.decoder(x_TSC + self.pos_embed_TSC, x_TA)
             else:
-                # generation/eval
-                x_TA_clone = x_TA.clone().to(x_TSC.device)
-                T, S = x_TSC.shape[1], x_TSC.shape[2]
-                action_token_size = 64
-                x_TA_clone = self.action_encoder(x_TA_clone)
-                actions_masked = x_TA_clone[:, :T, None].repeat(
-                    1, 1, action_token_size, 1
-                )  # B, 16, 64, 256
-                action_mask = torch.zeros(len(actions_masked), T, 1).unsqueeze(-1).to(actions_masked.device)
-                action_mask[:, out_t:] = 1
-                # print (self.model.action_mask_tokens[:, timestep:].shape)
-                # print (action_mask[:, timestep:].shape)
-                actions_masked = (
-                    action_mask[:, :T] * self.action_mask_tokens[:, :T]
-                    + (1 - action_mask[:, :T]) * actions_masked[:, :T]
-                )
-                x_TSC = torch.concat((x_TSC + self.pos_embed_TSC, actions_masked), dim=2)  # [B, T, S + 64, D]
-                x_TSC = self.decoder(x_TSC, x_TA_clone, self.pos_embed_TA)
-
-                x_TA = self.action_decoder(x_TSC[:, :, -action_token_size:, :].mean(dim=2))
-                x_TSC = x_TSC[:, :, :S, :]
-
-            # x_TSC = self.decoder(x_TSC + self.pos_embed_TSC, x_TA, self.pos_embed_TA)
-            # x_TSC, x_A = self.decoder(x_TSC, x_TA, self.pos_embed_TA)
+                # TODO: generation/eval
+                pass
         else:
             x_TSC = self.decoder(x_TSC + self.pos_embed_TSC)
+
         x_next_TSC = self.out_x_proj(x_TSC)
 
         logits_CTHW = rearrange(x_next_TSC, "B T (H W) C -> B C T H W", H=self.h, W=self.w)
@@ -495,17 +439,18 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         x_THW = rearrange(input_ids, "B (T H W) -> B T H W", T=T, H=H, W=W)
 
         if self.action_conditioned:
-            action_mask = torch.zeros_like(actions)
-            drop_ratio = torch.rand(len(actions), 1, 1)
-            action_mask = torch.rand(len(actions), T, 1) < drop_ratio
-            self.relevant_action_mask = action_mask.unsqueeze(-1).to(x_THW.device)
-
             # logits_CTHW = self.compute_logits(x_THW, actions)
-            logits_CTHW, pred_action = self.compute_logits(x_THW, actions)
+            pred_actions_output = self.lam(input_ids, labels, actions, labels_actions)
+            pred_actions_logits = pred_actions_output.logits
+            
+            # the actions fed into the video decoder should be the first gt action (which is free) and the remaining 15 predicted
+            action_input = torch.cat([pred_actions_output.encoded_actions[:, 0], pred_actions_logits[:, :-1]], dim=1)
+            
+            logits_CTHW = self.compute_logits(input_ids, action_input)
 
             if self.predict_actions:
-                action_loss = self.action_loss(pred_action, labels_actions)
-                action_loss = (action_loss * self.relevant_action_mask[..., 0]).mean()
+                action_loss = pred_actions_output.loss
+
         else:
             logits_CTHW = self.compute_logits(x_THW)
 

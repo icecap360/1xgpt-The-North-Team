@@ -26,7 +26,7 @@ from transformers import (
 
 from data import RawTokenDataset, get_maskgit_collator
 from eval_utils import decode_tokens, compute_lpips, compute_loss
-from genie.st_mask_git import GenieConfig, STMaskGIT
+from genie.st_mask_git_joint import GenieConfig, STMaskGIT
 # from llama.config import LlamaConfig1X
 # from llama.modeling_llama_mup import LlamaForCausalLM
 from visualize import decode_latents_wrapper

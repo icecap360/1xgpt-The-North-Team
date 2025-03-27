@@ -111,6 +111,66 @@ class RawTokenDataset(TorchDataset):
     def __len__(self):
         return len(self.valid_start_inds)
 
+    # def __getitem__(self, idx):
+    #     """
+    #     Returns a flattened sequence of tokens representing `self.window_size` frames,
+    #     spaced `self.stride` apart.
+    #     """
+    #     start_ind = self.valid_start_inds[idx]
+    #     x = torch.from_numpy((self.data[start_ind : start_ind + self.video_len + 1 : self.stride]).astype(np.int64))
+    #     x = x.flatten()
+
+    #     if self.with_actions:
+    #         actions = np.concatenate(
+    #             [
+    #                 self.driving_command[start_ind : start_ind + self.video_len + 1 : self.stride], 
+    #                 self.joint_pos[start_ind : start_ind + self.video_len + 1 : self.stride],
+    #                 self.neck_desired[start_ind : start_ind + self.video_len + 1 : self.stride],
+    #                 self.l_hand_closure[start_ind : start_ind + self.video_len + 1 : self.stride],
+    #                 self.r_hand_closure[start_ind : start_ind + self.video_len + 1 : self.stride],
+    #             ], axis=1
+    #         )
+    #         actions -= np.concatenate(
+    #             [
+    #                 self.driving_command_means,
+    #                 self.joint_pos_means,
+    #                 self.neck_desired_means,
+    #                 self.l_hand_closure_means,
+    #                 self.r_hand_closure_means
+    #             ], axis=0
+    #         ) 
+    #         actions /= np.concatenate(
+    #             [
+    #                 self.driving_command_stds,
+    #                 self.joint_pos_stds,
+    #                 self.neck_desired_stds,
+    #                 self.l_hand_closure_stds,
+    #                 self.r_hand_closure_stds
+    #             ], axis=0
+    #         ) 
+
+    #         actions = torch.from_numpy(actions)
+    #         # labels_actions = actions[-1]
+    #         # actions = actions[:-1]
+    #         labels_actions = actions.clone()
+    #         attention_mask = torch.ones_like(x)
+    #         return {
+    #             "input_ids": x,
+    #             "labels": x,
+    #             "attention_mask": attention_mask,
+    #             "labels_actions": labels_actions,
+    #             "actions": actions
+    #         }
+    #     else:
+    #         attention_mask = torch.ones_like(x)
+    #         return {
+    #             "input_ids": x,
+    #             "labels": x,
+    #             "attention_mask": attention_mask,
+    #             # "labels_actions": labels_actions,
+    #             # "actions": actions
+    #             }
+
     def __getitem__(self, idx):
         """
         Returns a flattened sequence of tokens representing `self.window_size` frames,
@@ -138,7 +198,7 @@ class RawTokenDataset(TorchDataset):
                     self.l_hand_closure_means,
                     self.r_hand_closure_means
                 ], axis=0
-            ) 
+            )  
             actions /= np.concatenate(
                 [
                     self.driving_command_stds,
@@ -147,10 +207,14 @@ class RawTokenDataset(TorchDataset):
                     self.l_hand_closure_stds,
                     self.r_hand_closure_stds
                 ], axis=0
-            ) 
+            )
+
             actions = torch.from_numpy(actions)
-            labels_actions = actions[-1]
+
+            # shifted labels
+            labels_actions = actions[1:].clone()
             actions = actions[:-1]
+
             attention_mask = torch.ones_like(x)
             return {
                 "input_ids": x,

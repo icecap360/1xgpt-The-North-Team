@@ -35,7 +35,7 @@ STRIDE = 15  # Data is 30 Hz so with stride 15, video is 2 Hz
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate GENIE-style models.")
     parser.add_argument(
-        "--val_data_dir", type=str, default="../data/val_v1.1",
+        "--val_data_dir", type=str, default="./data/val_v1.1",
         help="A directory with video data, should have a `metadata.json` and `video.bin`."
     )
     parser.add_argument(
@@ -43,7 +43,7 @@ def parse_args():
         help="Path to a HuggingFace-style checkpoint."
     )
     parser.add_argument(
-        "--batch_size", type=int, default=16,
+        "--batch_size", type=int, default=4,
         help="Batch size, current script only supports a single GPU."
     )
     parser.add_argument(
@@ -69,14 +69,19 @@ def parse_args():
         help="If specified, will stop evaluation early after `max_examples` examples."
     )
 
+    parser.add_argument(
+        "--action_conditioned",
+        action="store_true",
+    )
+
     return parser.parse_args()
 
 
 class GenieEvaluator:
-    def __init__(self, args, decode_latents, device="cuda"):
+    def __init__(self, args, decode_latents, device="cuda", action_conditioned=False):
         super().__init__()
 
-        self.model = STMaskGIT.from_pretrained(args.checkpoint_dir)
+        self.model = STMaskGIT.from_pretrained(args.checkpoint_dir, log_activations=False, activation_log_dir="./")
 
         self.model = self.model.to(device=device)
         self.model.eval()
@@ -88,7 +93,9 @@ class GenieEvaluator:
         self.maskgit_steps = args.maskgit_steps
         self.temperature = args.temperature
 
-    def predict_zframe_logits(self, input_ids: torch.LongTensor) -> tuple[torch.LongTensor, torch.FloatTensor]:
+        self.action_conditioned = action_conditioned
+
+    def predict_zframe_logits(self, input_ids: torch.LongTensor, actions = None) -> tuple[torch.LongTensor, torch.FloatTensor]:
         """
         Conditioned on each prefix: [frame_0], [frame_0, frame_1], ..., [frame_0, frame_1, ... frame_{T-1}],
         predict the tokens in the following frame: [pred_frame_1, pred_frame_2, ..., pred_frame_T].
@@ -111,6 +118,7 @@ class GenieEvaluator:
         """
         inputs_THW = rearrange(input_ids, "b (t h w) -> b t h w", t=WINDOW_SIZE,
             h=self.latent_h, w=self.latent_w).to(self.device)
+        B, T, H, W = inputs_THW.shape
         all_samples = []
         all_logits = []
         for timestep in range(1, WINDOW_SIZE):
@@ -121,6 +129,7 @@ class GenieEvaluator:
             # MaskGIT sampling
             samples_HW, factored_logits = self.model.maskgit_generate(
                 inputs_masked, 
+                prompt_TA=actions,
                 out_t=timestep, 
                 maskgit_steps=self.maskgit_steps,
                 temperature=self.temperature,
@@ -158,7 +167,7 @@ def main():
     transformers.set_seed(42)
     args = parse_args()
 
-    val_dataset = RawTokenDataset(args.val_data_dir, window_size=WINDOW_SIZE, stride=STRIDE, filter_overlaps=True)
+    val_dataset = RawTokenDataset(args.val_data_dir, window_size=WINDOW_SIZE, stride=STRIDE, filter_overlaps=True, with_actions=args.action_conditioned)
     args.latent_h = args.latent_w = val_dataset.metadata["s"]
 
     decode_latents = decode_latents_wrapper()
@@ -169,7 +178,7 @@ def main():
 
     dataloader = DataLoader(val_dataset, collate_fn=default_data_collator, batch_size=args.batch_size)
 
-    evaluator = GenieEvaluator(args, decode_latents)
+    evaluator = GenieEvaluator(args, decode_latents, action_conditioned=args.action_conditioned)
     metrics = defaultdict(AvgMetric)
 
     if args.save_outputs_dir is not None:
@@ -182,7 +191,12 @@ def main():
                                        h=args.latent_h, w=args.latent_w)
 
         start_time = time.time()
-        samples, factored_logits = evaluator.predict_zframe_logits(batch["input_ids"])
+
+        if args.action_conditioned:
+            samples, factored_logits = evaluator.predict_zframe_logits(batch["input_ids"], batch["actions"])
+        else:
+            samples, factored_logits = evaluator.predict_zframe_logits(batch["input_ids"])
+            
         frames_per_batch = (WINDOW_SIZE - 1) * batch["input_ids"].size(0)
         metrics["gen_time"].update((time.time() - start_time) / frames_per_batch, batch_size)
 
