@@ -131,13 +131,13 @@ def cosine_schedule(u):
 
 class STMaskGIT(nn.Module, PyTorchModelHubMixin):
     # Next-Token prediction as done in https://arxiv.org/pdf/2402.15391.pdf
-    def __init__(self, config: GenieConfig, log_activations, activation_log_dir):
+    def __init__(self, config: GenieConfig, log_activations, activation_log_dir, lam_config=None):
         super().__init__()
         self.h = self.w = math.isqrt(config.S)
         assert self.h**2 == config.S, "Expected S to be square"
         
         self.action_conditioned = config.action_conditioned
-        self.predict_actions = config.predict_actions
+
         if self.action_conditioned:
             self.decoder = STATransformerDecoder(
                 num_layers=config.num_layers,
@@ -153,9 +153,11 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
                 mlp_bias=config.mlp_bias,
                 mlp_drop=config.mlp_drop,
             )
-            self.action_loss = nn.MSELoss()
-            self.lam = LatentActionModel(config)
+
+            print ("Initialized lam")
+            print (lam_config)
             
+            self.lam = LatentActionModel(lam_config)
             self.activation_logger = None
             if log_activations:
                 self.activation_logger = ActivationLogger(self.decoder, activation_log_dir, log_interval=1)
@@ -411,17 +413,13 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         # only optimize on the masked/noised logits?
         return relevant_loss, relevant_acc
 
-    def compute_logits(self, x_THW, x_TA=None, out_t=None):
+    def compute_logits(self, x_THW, x_TA=None):
         # x_THW is for z0,...,zT while x_targets is z1,...,zT
         x_TS = rearrange(x_THW, "B T H W -> B T (H W)")
         x_TSC = self.token_embed(x_TS)
 
         if self.action_conditioned:
-            if not out_t:
-                x_TSC = self.decoder(x_TSC + self.pos_embed_TSC, x_TA)
-            else:
-                # TODO: generation/eval
-                pass
+            x_TSC = self.decoder(x_TSC + self.pos_embed_TSC, x_TA)
         else:
             x_TSC = self.decoder(x_TSC + self.pos_embed_TSC)
 
@@ -429,27 +427,43 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
 
         logits_CTHW = rearrange(x_next_TSC, "B T (H W) C -> B C T H W", H=self.h, W=self.w)
 
-        if self.action_conditioned:
-            return logits_CTHW, x_TA
-        else:
-            return logits_CTHW
+        return logits_CTHW
 
-    def forward(self, input_ids, labels, actions=None, labels_actions=None):
+    # def forward(self, input_ids, labels, actions, labels_actions, pred_actions=None, encoded_actions=None, action_loss=None):
+    #     T, H, W = self.config.T, self.h, self.w
+    #     x_THW = rearrange(input_ids, "B (T H W) -> B T H W", T=T, H=H, W=W)
+
+    #     if self.action_conditioned:
+    #         # the actions fed into the video decoder should be the first gt encoded action (which is free) and the remaining 15 predicted
+    #         action_input = torch.cat([encoded_actions[:, 0].unsqueeze(1), pred_actions], dim=1)
+    #         logits_CTHW = self.compute_logits(x_THW, action_input)
+
+    #     else:
+    #         logits_CTHW = self.compute_logits(x_THW)
+
+    #     labels = rearrange(labels, "B (T H W) -> B T H W", T=T, H=H, W=W)
+
+    #     # Record the loss over masked tokens only to make it more comparable to LLM baselines
+    #     relevant_mask = x_THW[:, 1:] == self.mask_token_id  # could also get mask of corrupted tokens by uncommenting line in `get_maskgit_collator`
+    #     relevant_loss, relevant_acc = self.compute_loss_and_acc(logits_CTHW, labels, relevant_mask)
+
+    #     if self.action_conditioned and action_loss:
+    #         relevant_loss += action_loss
+        
+    #     if self.activation_logger:
+    #         self.activation_logger.step()
+
+    #     return ModelOutput(loss=relevant_loss, acc=relevant_acc, logits=logits_CTHW)
+    def forward(self, input_ids, labels, actions, labels_actions):
         T, H, W = self.config.T, self.h, self.w
         x_THW = rearrange(input_ids, "B (T H W) -> B T H W", T=T, H=H, W=W)
 
         if self.action_conditioned:
-            # logits_CTHW = self.compute_logits(x_THW, actions)
-            pred_actions_output = self.lam(input_ids, labels, actions, labels_actions)
-            pred_actions_logits = pred_actions_output.logits
-            
-            # the actions fed into the video decoder should be the first gt action (which is free) and the remaining 15 predicted
-            action_input = torch.cat([pred_actions_output.encoded_actions[:, 0], pred_actions_logits[:, :-1]], dim=1)
-            
-            logits_CTHW = self.compute_logits(input_ids, action_input)
+            action_loss, pred_actions, encoded_actions = self.lam(input_ids, labels, actions=actions, labels_actions=labels_actions)
 
-            if self.predict_actions:
-                action_loss = pred_actions_output.loss
+            # the actions fed into the video decoder should be the first gt encoded action (which is free) and the remaining 15 predicted
+            action_input = torch.cat([encoded_actions[:, 0].unsqueeze(1), pred_actions], dim=1)
+            logits_CTHW = self.compute_logits(x_THW, action_input)
 
         else:
             logits_CTHW = self.compute_logits(x_THW)
@@ -460,7 +474,7 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         relevant_mask = x_THW[:, 1:] == self.mask_token_id  # could also get mask of corrupted tokens by uncommenting line in `get_maskgit_collator`
         relevant_loss, relevant_acc = self.compute_loss_and_acc(logits_CTHW, labels, relevant_mask)
 
-        if self.action_conditioned and self.predict_actions:
+        if self.action_conditioned and self.train_lam:
             relevant_loss += action_loss
         
         if self.activation_logger:
@@ -468,6 +482,9 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
 
         return ModelOutput(loss=relevant_loss, acc=relevant_acc, logits=logits_CTHW)
 
+    def set_train_lam(self, train_lam):
+        self.train_lam = train_lam
+    
     def init_weights(self):
         """ Works with and without muP. """
         std = 0.02
@@ -485,11 +502,11 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
                 if module.padding_idx is not None:
                     module.weight.data[module.padding_idx].zero_()
 
-    def set_mup_shapes(self, rescale_params=False, log_activations=False, activation_log_dir=None):
+    def set_mup_shapes(self, rescale_params=False, log_activations=False, activation_log_dir=None, lam_config=None):
         base_config = self.config.shallow_copy()
         base_config.num_heads = 8
         base_config.d_model = 256  # currently hardcoding to this shape
-        base_model = STMaskGIT(base_config, log_activations, activation_log_dir)
+        base_model = STMaskGIT(base_config, log_activations, activation_log_dir, lam_config)
 
         mup.set_base_shapes(self, base_model, rescale_params=rescale_params)
 

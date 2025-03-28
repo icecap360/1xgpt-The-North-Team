@@ -203,7 +203,7 @@ class LatentActionModel(nn.Module, PyTorchModelHubMixin):
 
         loss = self.action_loss(pred_actions, labels_actions)
 
-        return ModelOutput(loss=loss, logits=pred_actions, encoded_actions=x_TA, acc=1.0)
+        return loss, pred_actions_logits, x_TA + self.pos_embed_TA
     
     # @classmethod
     # def from_pretrained(cls, *args, **kwargs):

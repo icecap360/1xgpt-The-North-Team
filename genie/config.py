@@ -32,8 +32,10 @@ class GenieConfig:
     proj_bias: bool = True
     attn_drop: float = 0.0
     qk_norm: bool = True
+
     action_conditioned: bool = False
     predict_actions: bool = False
+    train_lam: bool = False
     
     # MLP
     mlp_ratio: float = 4.0

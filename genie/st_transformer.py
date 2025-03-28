@@ -48,58 +48,9 @@ class Mlp(nn.Module):
         x = self.drop(self.fc2(x))
         return x
 
-def modulate(x, shift, scale):
-    return x * (1 + scale) + shift
+# def modulate(x, shift, scale):
+#     return x * (1 + scale) + shift
     
-class ModulateLayer(nn.Module):
-    """
-    Modified from the final layer adopted from DiT with token-wise modulation.
-    """
-
-    def __init__(self, model_channels, out_channels):
-        super().__init__()
-        self.norm_final = nn.LayerNorm(out_channels, elementwise_affine=False, eps=1e-6)
-
-        self.linear_out = nn.Linear(out_channels, out_channels, bias=True)
-        self.adaLN_modulation = nn.Sequential(
-            nn.Linear(model_channels, model_channels), nn.SiLU(), nn.Linear(model_channels, 2 * out_channels, bias=True)
-        )
-        self.apply(self._init_weights)
-
-    def forward(self, x, c):
-        """
-        a simple modulation
-        """
-        x_shape = x.shape
-        x = rearrange(x, "(b s) t d -> b s t d", b=len(c))
-        c = c[:, None, : x_shape[2]]
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
-        x = modulate(self.norm_final(x), shift, scale)
-        x = self.linear_out(x)
-        return x.view(x_shape)
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            torch.nn.init.xavier_uniform_(m.weight, gain=0.1)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-            if m.weight is not None:
-                nn.init.constant_(m.weight, 1.0)
-
-# def modulate(x, shift, scale, temporal=True):
-#     x_shape = x.shape
-#     if temporal:
-#         x = rearrange(x, "(b s) t d -> b s t d", b=len(scale))
-#     else:
-#         x = rearrange(x, "(b t) s d -> b t s d", b=len(scale))
-    
-#     x = x * (1 + scale) + shift
-#     return x.view(x_shape)
-
-
 # class ModulateLayer(nn.Module):
 #     """
 #     Modified from the final layer adopted from DiT with token-wise modulation.
@@ -109,40 +60,98 @@ class ModulateLayer(nn.Module):
 #         super().__init__()
 #         self.norm_final = nn.LayerNorm(out_channels, elementwise_affine=False, eps=1e-6)
 
-#         # self.linear_out = nn.Linear(out_channels, out_channels, bias=True)
-#         self.adaLN_modulation_spatial = nn.Sequential(
+#         self.linear_out = nn.Linear(out_channels, out_channels, bias=True)
+#         self.adaLN_modulation = nn.Sequential(
 #             nn.Linear(model_channels, model_channels), nn.SiLU(), nn.Linear(model_channels, 3 * out_channels, bias=True)
 #         )
-#         self.adaLN_modulation_temporal = nn.Sequential(
-#             nn.Linear(model_channels, model_channels), nn.SiLU(), nn.Linear(model_channels, 6 * out_channels, bias=True)
-#         )
-#         self.d_model = model_channels
 #         self.apply(self._init_weights)
 
-#     def forward(self, c):
+#     def forward(self, x, c):
 #         """
-#         regress modulation parameters
+#         a simple modulation
 #         """
-#         c_s = c[:, :, None, :] # B, T, S, C
-#         scale_s, shift_s, scale_s_2 = self.adaLN_modulation_spatial(c_s).chunk(3, dim=-1)
+#         x_shape = x.shape
+#         x = rearrange(x, "(b s) t d -> b s t d", b=len(c))
+#         c = c[:, None, : x_shape[2]]
+#         shift, scale = self.adaLN_modulation(c).chunk(3, dim=-1)
+#         x = modulate(self.norm_final(x), shift, scale)
+#         x = self.linear_out(x)
+#         return x.view(x_shape)
 
-#         c_t = c[:, None, :, :] # B, S, T, C
-#         scale_t, shift_t, scale_t_2, scale_mlp, shift_mlp, scale_mlp_2 = self.adaLN_modulation_temporal(c_t).chunk(6, dim=-1)
+#     def _init_weights(self, m):
+#         if isinstance(m, nn.Linear):
+#             torch.nn.init.xavier_uniform_(m.weight, gain=0.1)
+#             if isinstance(m, nn.Linear) and m.bias is not None:
+#                 nn.init.constant_(m.bias, 0)
+#         elif isinstance(m, nn.LayerNorm):
+#             if m.bias is not None:
+#                 nn.init.constant_(m.bias, 0)
+#             if m.weight is not None:
+#                 nn.init.constant_(m.weight, 1.0)
+
+def modulate(x, shift, scale, temporal=True):
+    x_shape = x.shape
+    if temporal:
+        x = rearrange(x, "(b s) t d -> b s t d", b=len(scale))
+    else:
+        x = rearrange(x, "(b t) s d -> b t s d", b=len(scale))
+    
+    x = x * (1 + scale) + shift
+    return x.view(x_shape)
+
+def scale(x, gate, temporal=True):
+    x_shape = x.shape
+    if temporal:
+        x = rearrange(x, "(b s) t d -> b s t d", b=len(gate))
+    else:
+        x = rearrange(x, "(b t) s d -> b t s d", b=len(gate))
+    
+    x = x * gate
+    return x.view(x_shape)
+
+class ModulateLayer(nn.Module):
+    """
+    Modified from the final layer adopted from DiT with token-wise modulation.
+    """
+
+    def __init__(self, model_channels, out_channels):
+        super().__init__()
+        self.norm_final = nn.LayerNorm(out_channels, elementwise_affine=False, eps=1e-6)
+
+        # self.linear_out = nn.Linear(out_channels, out_channels, bias=True)
+        # self.adaLN_modulation_spatial = nn.Sequential(
+        #     nn.Linear(model_channels, model_channels), nn.SiLU(), nn.Linear(model_channels, 3 * out_channels, bias=True)
+        # )
+        self.adaLN_modulation_temporal = nn.Sequential(
+            nn.Linear(model_channels, model_channels), nn.SiLU(), nn.Linear(model_channels, 3 * out_channels, bias=True)
+        )
+        self.d_model = model_channels
+        self.apply(self._init_weights)
+
+    def forward(self, c):
+        """
+        regress modulation parameters
+        """
+        # c_s = c[:, :, None, :] # B, T, S, C
+        # scale_s, shift_s, scale_s_2 = self.adaLN_modulation_spatial(c_s).chunk(3, dim=-1)
+
+        c_t = c[:, None, :, :] # B, S, T, C
+        scale_t, shift_t, gate_t = self.adaLN_modulation_temporal(c_t).chunk(3, dim=-1)
         
-#         # return scale_t, shift_t, scale_mlp, shift_mlp, scale_t_2, scale_mlp_2
-#         return scale_t, shift_t, scale_s, shift_s, scale_mlp, shift_mlp, scale_t_2, scale_s_2, scale_mlp_2
+        # return scale_t, shift_t, scale_mlp, shift_mlp, scale_t_2, scale_mlp_2
+        return scale_t, shift_t, gate_t
 
-    # def _init_weights(self, m):
-    #     if isinstance(m, nn.Linear):
-    #         # torch.nn.init.xavier_uniform_(m.weight, gain=0.1)
-    #         nn.init.constant_(m.weight, 0)
-    #         if isinstance(m, nn.Linear) and m.bias is not None:
-    #             nn.init.constant_(m.bias, 0)
-    #     elif isinstance(m, nn.LayerNorm):
-    #         if m.bias is not None:
-    #             nn.init.constant_(m.bias, 0)
-    #         if m.weight is not None:
-    #             nn.init.constant_(m.weight, 1.0)
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            # torch.nn.init.xavier_uniform_(m.weight, gain=0.1)
+            nn.init.constant_(m.weight, 0)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+            if m.weight is not None:
+                nn.init.constant_(m.weight, 1.0)
 
 
 class STBlock(nn.Module):
@@ -267,7 +276,7 @@ class STABlock(nn.Module):
             qk_norm=qk_norm,
             use_mup=use_mup,
             attn_drop=attn_drop,
-            is_2d=False,
+            is_2d=True,
             seq_len=256
         )
 
@@ -321,13 +330,13 @@ class STABlock(nn.Module):
         # self.mlp_actions = Mlp(d_model=d_model, mlp_ratio=mlp_ratio, mlp_bias=mlp_bias, mlp_drop=mlp_drop)
 
         self.norm2 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, eps=1e-05)
-        self.norm3 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, eps=1e-05)
+        # self.norm3 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, eps=1e-05)
         self.norm4 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, eps=1e-05)
         self.norm1 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, eps=1e-05)
 
         # self.norm1 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, elementwise_affine=False, eps=1e-05)
         # self.norm2 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, elementwise_affine=False, eps=1e-05)
-        # self.norm3 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, elementwise_affine=False, eps=1e-05)
+        self.norm3 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, elementwise_affine=False, eps=1e-05)
         # self.norm4 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, elementwise_affine=False, eps=1e-05)
         
         # commented for rope
@@ -378,6 +387,8 @@ class STABlock(nn.Module):
     def forward(self, x_TSC: Tensor, x_TA) -> Tensor:
         B, T, S = x_TSC.size(0), x_TSC.size(1), x_TSC.size(2)
 
+        scale_t, shift_t, gate_t = self.modulate_actions(x_TA)
+
         x_SC = rearrange(x_TSC, "B T S C -> (B T) S C")
         x_SC = x_SC + self.spatial_attn(self.norm1(x_SC))
 
@@ -386,20 +397,16 @@ class STABlock(nn.Module):
         # x_TA = x_TA + self.mlp_actions(self.norm_actions(x_TA))
 
         # Process attention temporally
+        # x_TC = rearrange(x_SC, "(B T) S C -> (B S) T C", T=T)
+        # x_TC = x_TC + self.modulate_actions(x_TC, x_TA)
+
+        # x_TC = x_TC + self.temporal_attn(x_TC, causal=True)
+        # x_TC = x_TC + self.mlp(self.norm2(x_TC))
+
         x_TC = rearrange(x_SC, "(B T) S C -> (B S) T C", T=T)
-        x_TC = x_TC + self.modulate_actions(x_TC, x_TA)
+        x_TC = modulate(self.norm3(x_TC), shift_t, scale_t)
+        x_TC = x_TC + scale(self.temporal_attn(x_TC, causal=True), gate_t)
 
-        # x_TSC = rearrange(x_TC, "(B S) T C -> B T S C", S=S)
-        # x_video = rearrange(x_TSC[:, :, :256, :], "B T S C -> (B S) T C")
-        # x_act = rearrange(x_TSC[:, :, 256:, :], "B T S C -> (B S) T C")
-        # x_video = x_video + self.modulate_video(self.norm4(x_video), x_TA)
-        # x_video = rearrange(x_video, "(B S) T C -> B T S C", B=B)
-        # x_act = x_act + self.modulate_actions(self.norm3(x_act), x_TA)
-        # x_act = rearrange(x_act, "(B S) T C -> B T S C", B=B)
-        # x_TSC = torch.concat((x_video, x_act), dim=2)  # [B, T, S + 64, D]
-        # x_TC = rearrange(x_TSC, "B T S C -> (B S) T C", T=T)
-
-        x_TC = x_TC + self.temporal_attn(x_TC, causal=True)
         x_TC = x_TC + self.mlp(self.norm2(x_TC))
 
         x_TSC = rearrange(x_TC, "(B S) T C -> B T S C", S=S)
@@ -467,29 +474,3 @@ class STATransformerDecoder(nn.Module):
 
         # act = self.action_decoder(act)
         return x
-
-    # def forward(self, tgt, act, pos_embed_act):
-    #     x = tgt
-        
-    #     B, T, S, C = tgt.size(0), tgt.size(1), tgt.size(2), tgt.size(3)
-
-    #     future_action_tokens = torch.stack([self.future_action_token]*B).to(act.device)
-    #     act = torch.concatenate(
-    #             (act, future_action_tokens), dim=1)
-        
-    #     spatial_act = self.action_temporal_to_spatial_encoder(act.reshape(x.shape[0], -1))
-    #     spatial_act = spatial_act.reshape(B, 256, 26)
-
-    #     act = act + pos_embed_act
-    #     act = self.action_encoder_temporal(act)
-
-    #     # spatial_act = torch.stack([self.spatial_action_tokens]*B).to(act.device)
-    #     spatial_pos_embed = self.pos_spatial_embedding
-    #     spatial_act = spatial_act + spatial_pos_embed
-    #     spatial_act = self.action_encoder_spatial(spatial_act)
-
-    #     for layer in self.layers:
-    #         x, act, spatial_act = layer(x, act, spatial_act)
-
-    #     pred_action = self.action_decoder(act[:, -1])
-    #     return x, pred_action

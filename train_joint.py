@@ -27,6 +27,8 @@ from transformers import (
 from data import RawTokenDataset, get_maskgit_collator
 from eval_utils import decode_tokens, compute_lpips, compute_loss
 from genie.st_mask_git_joint import GenieConfig, STMaskGIT
+from lam.lam import LatentActionModel
+from accelerate import DistributedDataParallelKwargs
 # from llama.config import LlamaConfig1X
 # from llama.modeling_llama_mup import LlamaForCausalLM
 from visualize import decode_latents_wrapper
@@ -243,8 +245,14 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--predict_actions",
+        "--train_lam",
         action="store_true",
+    )
+
+    parser.add_argument(
+        "--lam_checkpoint",
+        type=str,
+        default=None,
     )
 
     args = parser.parse_args()
@@ -351,7 +359,8 @@ def main():
         "Exactly one of `llama_config` and `genie_config` should be set."
 
     # Manual gradient accumulation
-    accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps, log_with=args.report_to, project_dir=args.output_dir)
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps, log_with=args.report_to, project_dir=args.output_dir, kwargs_handlers=[ddp_kwargs])
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -440,17 +449,30 @@ def main():
         config.image_vocab_size = vocab_size
         config.T = args.window_size
         config.S = latent_side_len**2
-        model = STMaskGIT(config, log_activations=args.log_activations, activation_log_dir=args.log_name + "/activations")
+
+        lam_config = GenieConfig.from_pretrained(f"{args.lam_checkpoint}/config.json")
+
+        model = STMaskGIT(config, log_activations=args.log_activations, activation_log_dir=args.log_name + "/activations", lam_config=lam_config)
+        lam_model = LatentActionModel(lam_config)
 
         if args.mu_transfer:
             model.set_mup_shapes(rescale_params=True)
             model.init_weights()  # might be unnecessary if `rescale_params` is True
 
+        print ("mup", config.use_mup)
+
         if args.resume_from_checkpoint:
-            model_resume = STMaskGIT.from_pretrained(args.resume_from_checkpoint, log_activations=args.log_activations, activation_log_dir=args.log_name + "/activations")
+            model_resume = STMaskGIT.from_pretrained(args.resume_from_checkpoint, log_activations=args.log_activations, activation_log_dir=args.log_name + "/activations", lam_config=lam_config)
             missing_keys, unexpected_keys = model.load_state_dict(model_resume.state_dict(), strict=False)
             resume_step = None
-
+        
+        if args.lam_checkpoint:
+            lam_model_resume = LatentActionModel.from_pretrained(args.lam_checkpoint, config=lam_config)
+            missing_keys, unexpected_keys = model.lam.load_state_dict(lam_model_resume.state_dict(), strict=False)
+            resume_step = None
+        
+        model.set_train_lam(args.train_lam)
+        
     # Optimizer. Split weights in two groups, one with weight decay and the other not.
     no_decay = ["bias", "layer_norm.weight"]
     optimizer_grouped_parameters = [
@@ -629,6 +651,9 @@ def main():
 
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
+        if not args.train_lam:
+            model.lam.eval()
+
         if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
@@ -644,6 +669,7 @@ def main():
 
             with ctx_manager:
                 outputs = model(**batch)
+
                 loss = outputs.loss
                 loss_info[0] += loss.detach() * batch_size
                 loss_info[1] += batch_size
@@ -746,6 +772,8 @@ def main():
 
                 # Switch back to train mode
                 model.train()
+                if not args.train_lam:
+                    model.lam.eval()
 
             if completed_steps % args.vis_every_n_steps == 0:
                 if not args.overfit_first_batch:  # val is same as train otherwise
