@@ -54,7 +54,7 @@ def parse_args():
     parser.add_argument(
         "--window_size",
         type=int,
-        default=16,
+        default=3,
         help="Number of frames to in a sequence.",
     )
     parser.add_argument(
@@ -152,7 +152,7 @@ def parse_args():
     parser.add_argument(
         "--vis_every_n_steps",
         type=int,
-        default=10000,
+        default=1e12,
         help="Visualize every N training steps.",
     )
     parser.add_argument(
@@ -185,7 +185,7 @@ def parse_args():
     parser.add_argument(
         "--adam_beta_2",
         type=float,
-        default=0.999,
+        default=0.95,
     )
     parser.add_argument(
         "--adam_eps",
@@ -329,13 +329,37 @@ def visualize(accelerator, model, dataloader, window_size, metrics_prefix="eval"
         wandb_tracker = accelerator.get_tracker("wandb")
         wandb_tracker.log(metrics, commit=False)
 
+def log_top_gradients(step, model, log_dir, top_k=5):
+
+    if step > 500:
+        return
+    
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "gradient_log.txt")
+    
+    grads = []
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            grad_norm = torch.norm(param.grad).item()
+            grads.append((name, grad_norm))
+    
+    # Sort by gradient norm in descending order and take top_k
+    top_params = sorted(grads, key=lambda x: x[1], reverse=True)[:top_k]
+    
+    with open(log_file, "a") as f:
+        f.write(f"Step {step}:\n")
+        for name, grad_norm in top_params:
+            f.write(f"{name}: {grad_norm}\n")
+        f.write("\n")
+
 def main():
     args = parse_args()
     assert (args.llama_config is not None) ^ (args.genie_config is not None), \
         "Exactly one of `llama_config` and `genie_config` should be set."
 
     # Manual gradient accumulation
-    accelerator = Accelerator(gradient_accumulation_steps=1, log_with=args.report_to, project_dir=args.output_dir,)
+    accelerator = Accelerator(gradient_accumulation_steps=1, log_with=args.report_to, project_dir=args.output_dir, mixed_precision='fp16')
+    # accelerator = Accelerator(gradient_accumulation_steps=1, log_with=args.report_to, project_dir=args.output_dir)
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -360,7 +384,7 @@ def main():
     train_dataset = RawTokenDataset(args.train_data_dir, window_size=args.window_size,
                                     stride=args.stride, filter_overlaps=args.filter_overlaps)
     if not args.overfit_first_batch:
-        eval_dataset = RawTokenDataset(args.val_data_dir, window_size=args.window_size,
+        eval_dataset = RawTokenDataset(args.val_data_dir, is_eval=True, window_size=args.window_size,
                                        stride=args.stride, filter_overlaps=True)
     else:
         train_dataset.valid_start_inds = train_dataset.valid_start_inds[:args.per_device_train_batch_size
@@ -369,9 +393,12 @@ def main():
         eval_dataset = train_dataset
 
     assert all(train_dataset.metadata[shared_key] == eval_dataset.metadata[shared_key]
-               for shared_key in ("s", "vocab_size", "hz"))
+               for shared_key in (["hz"]))
 
-    latent_side_len, vocab_size, hz = [train_dataset.metadata[key] for key in ("s", "vocab_size", "hz")]
+    hz = train_dataset.metadata["hz"]
+    latent_side_len = 32
+    vocab_size = 64000
+
 
     if args.llama_config is not None:
         raise NotImplementedError("Have not factorized Llama vocabulary.")
@@ -433,6 +460,8 @@ def main():
         if args.resume_from_checkpoint:
             model = STMaskGIT.from_pretrained(args.resume_from_checkpoint)
             resume_step = None
+        
+        print (config.image_vocab_size, config.T, config.S, config.num_factored_vocabs, config.factored_vocab_size)
 
     # Optimizer. Split weights in two groups, one with weight decay and the other not.
     no_decay = ["bias", "layer_norm.weight"]
@@ -466,7 +495,7 @@ def main():
 
     eval_dataloader = DataLoader(
         eval_dataset, shuffle=False, collate_fn=collate_fn,
-        batch_size=args.per_device_eval_batch_size, pin_memory=True,
+        batch_size=args.per_device_eval_batch_size, pin_memory=True
     )
 
     # Scheduler and math around the number of training steps.
@@ -639,7 +668,9 @@ def main():
             # Everything below only happens on update step
 
             if args.max_grad_norm is not None:
-                accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                # log_top_gradients(step, model, args.output_dir)
+                grad_norm = accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                # accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             optimizer.step()
             lr_scheduler.step()
@@ -666,6 +697,7 @@ def main():
                     "learning_rate": lr_scheduler.get_last_lr()[0],
                     "flops": (completed_steps + 1) * experiment_config["FLOPs_per_update_step"],
                     "throughput_examples": experiment_config["effective_batch_size"] / batch_time,
+                    "grad_norm" : grad_norm,
                 }, step=completed_steps)
 
             progress_bar.update(1)

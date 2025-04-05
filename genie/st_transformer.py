@@ -2,6 +2,8 @@ from torch import nn, Tensor
 from einops import rearrange
 
 from genie.attention import SelfAttention
+from genie.rope import RotaryPositionEmbeddingPytorchV2
+from genie.fft2d import FFT2D, InverseFFT2D
 
 
 class Mlp(nn.Module):
@@ -24,7 +26,6 @@ class Mlp(nn.Module):
         x = self.drop(self.fc2(x))
         return x
 
-
 class STBlock(nn.Module):
     # See Figure 4 of https://arxiv.org/pdf/2402.15391.pdf
     def __init__(
@@ -39,10 +40,28 @@ class STBlock(nn.Module):
         mlp_ratio: float = 4.0,
         mlp_bias: bool = True,
         mlp_drop: float = 0.0,
+        use_rope = False
     ) -> None:
         super().__init__()
         self.norm1 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, eps=1e-05)
         # sequence dim is over each frame's 16x16 patch tokens
+        
+        self.spatial_rope = None
+        self.temporal_rope = None
+        if use_rope:
+            self.head_dim = d_model // num_heads
+            self.spatial_rope_config = self._create_2d_rope_config()
+            
+            self.spatial_rope = RotaryPositionEmbeddingPytorchV2(
+                seq_len=32*32, training_type=None, **self.spatial_rope_config
+            )
+
+            self.temporal_rope_config = self._create_1d_rope_config()
+            
+            self.temporal_rope = RotaryPositionEmbeddingPytorchV2(
+                seq_len=3, training_type=None, **self.temporal_rope_config
+            )
+
         self.spatial_attn = SelfAttention(
             num_heads=num_heads,
             d_model=d_model,
@@ -51,6 +70,7 @@ class STBlock(nn.Module):
             qk_norm=qk_norm,
             use_mup=use_mup,
             attn_drop=attn_drop,
+            rope=self.spatial_rope,
         )
 
         # sequence dim is over time sequence (16)
@@ -62,25 +82,143 @@ class STBlock(nn.Module):
             qk_norm=qk_norm,
             use_mup=use_mup,
             attn_drop=attn_drop,
+            rope=self.temporal_rope
         )
+
+        self.fft2d = FFT2D(d_model=d_model)
+        self.ifft2d = InverseFFT2D(d_model=d_model)
         
         self.norm2 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, eps=1e-05)
+        self.norm3 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, eps=1e-05)
         self.mlp = Mlp(d_model=d_model, mlp_ratio=mlp_ratio, mlp_bias=mlp_bias, mlp_drop=mlp_drop)
         
     def forward(self, x_TSC: Tensor) -> Tensor:
         # Process attention spatially
         T, S = x_TSC.size(1), x_TSC.size(2)
         x_SC = rearrange(x_TSC, 'B T S C -> (B T) S C')
-        x_SC = x_SC + self.spatial_attn(self.norm1(x_SC))
+        x_SC_fft2d = self.fft2d(self.norm1(x_SC))
+        x_SC_fft2d = self.spatial_attn(x_SC_fft2d)
+        x_SC = x_SC + self.ifft2d(x_SC_fft2d)
 
         # Process attention temporally
         x_TC = rearrange(x_SC, '(B T) S C -> (B S) T C', T=T)
-        x_TC = x_TC + self.temporal_attn(x_TC, causal=True)
+        x_TC = x_TC + self.temporal_attn(self.norm3(x_TC), causal=True)
 
         # Apply the MLP
         x_TC = x_TC + self.mlp(self.norm2(x_TC))
         x_TSC = rearrange(x_TC, '(B S) T C -> B T S C', S=S)
         return x_TSC
+    
+    def _create_2d_rope_config(self):
+        return {
+            "dim": self.head_dim,
+            "rope_theta": 10000.0,
+            "rope_dim": "2D",
+            "latent_shape": (32, 32),
+        }
+
+    def _create_1d_rope_config(self):
+        return {
+            "dim": self.head_dim,
+            "rope_theta": 10000.0,
+            "max_position_embeddings" : 3,
+            "rope_dim": "1D",
+            "latent_shape": (3),
+        }
+    
+# class STBlock(nn.Module):
+#     # See Figure 4 of https://arxiv.org/pdf/2402.15391.pdf
+#     def __init__(
+#         self,
+#         num_heads: int,
+#         d_model: int,
+#         qkv_bias: bool = False,
+#         proj_bias: bool = True,
+#         qk_norm: bool = True,
+#         use_mup: bool = True,
+#         attn_drop: float = 0.0,
+#         mlp_ratio: float = 4.0,
+#         mlp_bias: bool = True,
+#         mlp_drop: float = 0.0,
+#         use_rope = False
+#     ) -> None:
+#         super().__init__()
+#         self.norm1 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, eps=1e-05)
+#         # sequence dim is over each frame's 16x16 patch tokens
+        
+#         self.spatial_rope = None
+#         self.temporal_rope = None
+#         if use_rope:
+#             self.head_dim = d_model // num_heads
+#             self.spatial_rope_config = self._create_2d_rope_config()
+            
+#             self.spatial_rope = RotaryPositionEmbeddingPytorchV2(
+#                 seq_len=32*32, training_type=None, **self.spatial_rope_config
+#             )
+
+#             self.temporal_rope_config = self._create_1d_rope_config()
+            
+#             self.temporal_rope = RotaryPositionEmbeddingPytorchV2(
+#                 seq_len=3, training_type=None, **self.temporal_rope_config
+#             )
+
+#         self.spatial_attn = SelfAttention(
+#             num_heads=num_heads,
+#             d_model=d_model,
+#             qkv_bias=qkv_bias,
+#             proj_bias=proj_bias,
+#             qk_norm=qk_norm,
+#             use_mup=use_mup,
+#             attn_drop=attn_drop,
+#             rope=self.spatial_rope,
+#         )
+
+#         # sequence dim is over time sequence (16)
+#         self.temporal_attn = SelfAttention(
+#             num_heads=num_heads,
+#             d_model=d_model,
+#             qkv_bias=qkv_bias,
+#             proj_bias=proj_bias,
+#             qk_norm=qk_norm,
+#             use_mup=use_mup,
+#             attn_drop=attn_drop,
+#             rope=self.temporal_rope
+#         )
+        
+#         self.norm2 = nn.Identity() if qk_norm else nn.LayerNorm(d_model, eps=1e-05)
+#         self.mlp = Mlp(d_model=d_model, mlp_ratio=mlp_ratio, mlp_bias=mlp_bias, mlp_drop=mlp_drop)
+        
+#     def forward(self, x_TSC: Tensor) -> Tensor:
+#         # Process attention spatially
+#         T, S = x_TSC.size(1), x_TSC.size(2)
+#         x_SC = rearrange(x_TSC, 'B T S C -> (B T) S C')
+#         x_SC = x_SC + self.spatial_attn(self.norm1(x_SC))
+
+#         # Process attention temporally
+#         x_TC = rearrange(x_SC, '(B T) S C -> (B S) T C', T=T)
+#         x_TC = x_TC + self.temporal_attn(x_TC, causal=True)
+
+#         # Apply the MLP
+#         x_TC = x_TC + self.mlp(self.norm2(x_TC))
+#         x_TSC = rearrange(x_TC, '(B S) T C -> B T S C', S=S)
+#         return x_TSC
+    
+#     def _create_2d_rope_config(self):
+#         return {
+#             "dim": self.head_dim,
+#             "rope_theta": 10000.0,
+#             "rope_dim": "2D",
+#             "latent_shape": (32, 32),
+#         }
+
+#     def _create_1d_rope_config(self):
+#         return {
+#             "dim": self.head_dim,
+#             "rope_theta": 10000.0,
+#             "max_position_embeddings" : 3,
+#             "rope_dim": "1D",
+#             "latent_shape": (3),
+#         }
 
 
 class STTransformerDecoder(nn.Module):
@@ -97,8 +235,10 @@ class STTransformerDecoder(nn.Module):
         mlp_ratio: float = 4.0,
         mlp_bias: bool = True,
         mlp_drop: float = 0.0,
+        use_rope=True
     ):
         super().__init__()
+        
         self.layers = nn.ModuleList([STBlock(
             num_heads=num_heads,
             d_model=d_model,
@@ -110,6 +250,7 @@ class STTransformerDecoder(nn.Module):
             mlp_ratio=mlp_ratio,
             mlp_bias=mlp_bias,
             mlp_drop=mlp_drop,
+            use_rope=use_rope
         ) for _ in range(num_layers)])
 
     def forward(self, tgt):

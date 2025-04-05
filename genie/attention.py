@@ -16,6 +16,7 @@ class BasicSelfAttention(nn.Module):
         qk_norm: bool = True,
         use_mup: bool = True,
         attn_drop: float = 0.0,
+        rope = None
     ) -> None:
         super().__init__()
 
@@ -32,6 +33,8 @@ class BasicSelfAttention(nn.Module):
             # qk normalization https://arxiv.org/pdf/2302.05442
             # Note that LN is done in fp32, so they have to be
             self.norm = nn.LayerNorm(self.head_dim, eps=1e-05)
+        
+        self.rope = rope
 
     def forward(self, x: torch.Tensor, causal: bool = False) -> torch.Tensor:
         B, N, C = x.shape
@@ -68,6 +71,10 @@ class MemoryEfficientAttention(BasicSelfAttention):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
         q, k, v = unbind(qkv, 2)
+
+        if self.rope is not None:
+            q, k = self.rope(q, k)
+
         if self.qk_norm:
             q = self.norm(q)
             k = self.norm(k)

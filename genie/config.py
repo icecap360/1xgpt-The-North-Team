@@ -24,7 +24,9 @@ class GenieConfig:
     # Case 1: MLM training.
     # Case 2: Not standard MLM, `non_mlm`. Some earlier frames are left unmasked, as in Copilot4D.
     non_mlm_ratio: float = 0.5
-    num_prompt_frames: int = 8
+    num_prompt_frames: int = 1
+
+    use_rope: bool = True
 
     # Attention
     qkv_bias: bool = False
@@ -52,4 +54,7 @@ class GenieConfig:
         return GenieConfig(**vars(self))
 
     def __post_init__(self):
-        self.factored_vocab_size = nth_root(self.image_vocab_size, self.num_factored_vocabs)
+        # self.factored_vocab_size = nth_root(self.image_vocab_size, self.num_factored_vocabs)
+        # self.factored_vocab_size = 256
+        self.factored_vocab_size = 64000
+        # self.factored_vocab_size = 512

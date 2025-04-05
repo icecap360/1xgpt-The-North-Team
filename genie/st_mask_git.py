@@ -45,6 +45,7 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
             mlp_ratio=config.mlp_ratio,
             mlp_bias=config.mlp_bias,
             mlp_drop=config.mlp_drop,
+            use_rope=config.use_rope
         )
 
         self.pos_embed_TSC = torch.nn.Parameter(torch.zeros(1, config.T, config.S, config.d_model))
@@ -61,6 +62,8 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         self.out_x_proj = cls(config.d_model, config.factored_vocab_size * config.num_factored_vocabs)
 
         self.config = config
+
+        self.init_weights()
 
     def generate(
         self,
@@ -238,10 +241,13 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
                                     vocab_size=self.config.factored_vocab_size,
                                     num_vocabs=self.config.num_factored_vocabs)
 
-        factored_targets = factorize_labels(targets_THW)
+        factored_targets = factorize_labels(targets_THW, num_factored_vocabs=self.config.num_factored_vocabs, factored_vocab_size=self.config.factored_vocab_size)
 
         loss_THW = F.cross_entropy(factored_logits, factored_targets, reduction="none").sum(dim=1)
         acc_THW = (factored_logits.argmax(dim=1) == factored_targets).all(dim=1)
+
+        # loss_THW = F.cross_entropy(logits_CTHW, targets_THW, reduction="none").sum(dim=1)
+        # acc_THW = (logits_CTHW.argmax(dim=1) == targets_THW).all(dim=1)
 
         # Compute the mean masked error.
         # Multiply loss values by mask instead of indexing them, more computationally efficient.
@@ -274,19 +280,28 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
 
         # Record the loss over masked tokens only to make it more comparable to LLM baselines
         relevant_mask = x_THW[:, 1:] == self.mask_token_id  # could also get mask of corrupted tokens by uncommenting line in `get_maskgit_collator`
+        # print ("FORWARD", relevant_mask.shape, x_THW.shape)
         relevant_loss, relevant_acc = self.compute_loss_and_acc(logits_CTHW, labels, relevant_mask)
 
         return ModelOutput(loss=relevant_loss, acc=relevant_acc, logits=logits_CTHW)
 
     def init_weights(self):
         """ Works with and without muP. """
+        # initialize last proj to xavier
+        # initialize last time mod to 0
         std = 0.02
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 if hasattr(module.weight, "infshape"):  # muP
                     mup.normal_(module.weight, mean=0.0, std=std)
                 else:
-                    module.weight.data.normal_(mean=0.0, std=std)
+                    if module == self.token_embed.mask_token_embed: # manual correction for these
+                        nn.init.xavier_uniform_(module)
+                    elif module == self.out_x_proj:
+                        nn.init.xavier_uniform_(self.out_x_proj.weight)
+                    else:
+                        nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-2.0, b=2.0) # try this next
+                        # module.weight.data.normal_(mean=0.0, std=std)
 
                 if module.bias is not None:
                     module.bias.data.zero_()
