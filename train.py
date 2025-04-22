@@ -54,7 +54,13 @@ def parse_args():
     parser.add_argument(
         "--window_size",
         type=int,
-        default=3,
+        default=17,
+        help="Number of frames to in a sequence.",
+    )
+    parser.add_argument(
+        "--latent_window_size",
+        type=int,
+        default=6,
         help="Number of frames to in a sequence.",
     )
     parser.add_argument(
@@ -231,6 +237,11 @@ def parse_args():
         help="If specified, will not compile the model."
     )
 
+    parser.add_argument(
+        "--with_act",
+        action="store_true",
+    )
+
     args = parser.parse_args()
     now = datetime.datetime.now()
     timestamp = now.strftime("%m-%d-%H-%M")
@@ -382,10 +393,10 @@ def main():
     accelerator.wait_for_everyone()
 
     train_dataset = RawTokenDataset(args.train_data_dir, window_size=args.window_size,
-                                    stride=args.stride, filter_overlaps=args.filter_overlaps)
+                                    stride=args.stride, filter_overlaps=args.filter_overlaps, with_act=args.with_act)
     if not args.overfit_first_batch:
         eval_dataset = RawTokenDataset(args.val_data_dir, is_eval=True, window_size=args.window_size,
-                                       stride=args.stride, filter_overlaps=True)
+                                       stride=args.stride, filter_overlaps=True, with_act=args.with_act)
     else:
         train_dataset.valid_start_inds = train_dataset.valid_start_inds[:args.per_device_train_batch_size
                                                                          * args.gradient_accumulation_steps
@@ -449,8 +460,9 @@ def main():
         config = GenieConfig.from_pretrained(args.genie_config)
         config.use_mup = args.mu_transfer  # Note: changing this may affect pre-trained model due to attn scaling
         config.image_vocab_size = vocab_size
-        config.T = args.window_size
+        config.T = args.latent_window_size
         config.S = latent_side_len**2
+        config.with_act = args.with_act
         model = STMaskGIT(config)
 
         if args.mu_transfer:
@@ -458,10 +470,16 @@ def main():
             model.init_weights()  # might be unnecessary if `rescale_params` is True
 
         if args.resume_from_checkpoint:
-            model = STMaskGIT.from_pretrained(args.resume_from_checkpoint)
+            # model = STMaskGIT.from_pretrained(args.resume_from_checkpoint)
+            
+            from safetensors.torch import load_file
+            checkpoint_path = os.path.join(args.resume_from_checkpoint, "model.safetensors")
+            state_dict = load_file(checkpoint_path)
+            # Optional: strip keys if using Accelerate/FSDP wrappers
+            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
             resume_step = None
         
-        print (config.image_vocab_size, config.T, config.S, config.num_factored_vocabs, config.factored_vocab_size)
+        print (config.image_vocab_size, config.T, config.S, config.num_factored_vocabs, config.factored_vocab_size, config.with_act, model.with_act)
 
     # Optimizer. Split weights in two groups, one with weight decay and the other not.
     no_decay = ["bias", "layer_norm.weight"]
@@ -565,7 +583,7 @@ def main():
     # The trackers initialize automatically on the main process.
     experiment_config = vars(args) | vars(config)
 
-    seq_len = latent_side_len**2 * args.window_size
+    seq_len = latent_side_len**2 * args.latent_window_size
     effective_batch_size = args.per_device_train_batch_size * args.gradient_accumulation_steps \
                            * accelerator.num_processes
 

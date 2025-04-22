@@ -11,7 +11,8 @@ from transformers.utils import ModelOutput
 
 from genie.factorization_utils import FactorizedEmbedding, factorize_labels
 from genie.config import GenieConfig
-from genie.st_transformer import STTransformerDecoder
+from genie.st_transformer import STTransformerDecoder, Mlp
+from genie.fourier_head import Fourier_Head
 
 
 def cosine_schedule(u):
@@ -45,7 +46,8 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
             mlp_ratio=config.mlp_ratio,
             mlp_bias=config.mlp_bias,
             mlp_drop=config.mlp_drop,
-            use_rope=config.use_rope
+            use_rope=config.use_rope,
+            with_act=config.with_act
         )
 
         self.pos_embed_TSC = torch.nn.Parameter(torch.zeros(1, config.T, config.S, config.d_model))
@@ -59,8 +61,18 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         )
 
         cls = FixedMuReadout if config.use_mup else nn.Linear  # (Fixed)MuReadout might slow dow down compiled training?
-        self.out_x_proj = cls(config.d_model, config.factored_vocab_size * config.num_factored_vocabs)
 
+        self.with_act = config.with_act
+        if config.with_act:
+            self.action_encoder = nn.Sequential(
+                nn.Linear(config.d_action, config.d_model),
+                nn.GELU(),
+                Mlp(config.d_model),
+                nn.LayerNorm(config.d_model, eps=1e-05)
+            )
+            self.pos_embed_actions = torch.nn.Parameter(torch.zeros(34, config.d_model))
+
+        self.out_x_proj = cls(config.d_model, config.factored_vocab_size * config.num_factored_vocabs)
         self.config = config
 
         self.init_weights()
@@ -193,7 +205,7 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
                 confidences_HW *= torch.gather(probs, 1, sample.unsqueeze(1)).squeeze(1)
 
             prev_unmasked = unmasked.clone()
-            prev_img_flat = rearrange(prompt_THW[:, out_t], "B H W -> B (H W)")
+            prev_img_flat = rearrange(prompt_THW[:, out_t], "B H W -> B (H W)").to(torch.int64)
 
             samples_flat = samples_HW.reshape(bs, self.config.S)
 
@@ -234,7 +246,7 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
     def compute_loss_and_acc(self, logits_CTHW, targets_THW, relevant_mask_THW):
         # Video token prediction
         targets_THW = targets_THW.clone()
-        logits_CTHW, targets_THW = logits_CTHW[:, :, 1:], targets_THW[:, 1:]  # first frame always unmasked
+        logits_CTHW, targets_THW = logits_CTHW[:, :, 3:], targets_THW[:, 3:]  # first 3 frames always unmasked
 
         factored_logits = rearrange(logits_CTHW,
                                     "b (num_vocabs vocab_size) t h w -> b vocab_size num_vocabs t h w",
@@ -258,29 +270,40 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
         # only optimize on the masked/noised logits?
         return relevant_loss, relevant_acc
 
-    def compute_logits(self, x_THW):
+    def compute_logits(self, x_THW, actions=None):
         # x_THW is for z0,...,zT while x_targets is z1,...,zT
         x_TS = rearrange(x_THW, "B T H W -> B T (H W)")
         x_TSC = self.token_embed(x_TS)
 
         # additive embeddings, using the same vocab space
-        x_TSC = self.decoder(x_TSC + self.pos_embed_TSC)
+        if self.with_act:
+            x_TSC = self.decoder(x_TSC + self.pos_embed_TSC, actions + self.pos_embed_actions)
+        else:
+            x_TSC = self.decoder(x_TSC + self.pos_embed_TSC)
+
         x_next_TSC = self.out_x_proj(x_TSC)
 
         logits_CTHW = rearrange(x_next_TSC, "B T (H W) C -> B C T H W", H=self.h, W=self.w)
         return logits_CTHW
 
-    def forward(self, input_ids, labels):
+    def forward(self, input_ids, labels, actions=None):
         T, H, W = self.config.T, self.h, self.w
         x_THW = rearrange(input_ids, "B (T H W) -> B T H W", T=T, H=H, W=W)
 
-        logits_CTHW = self.compute_logits(x_THW)
+        if self.with_act:
+            # print (actions.shape)
+            # actions = actions.reshape(actions.shape[0], actions.shape[-2] * 2, actions.shape[-1])
+            actions = self.action_encoder(actions)
+            logits_CTHW = self.compute_logits(x_THW, actions)
+        else:
+            logits_CTHW = self.compute_logits(x_THW)
 
         labels = rearrange(labels, "B (T H W) -> B T H W", T=T, H=H, W=W)
 
         # Record the loss over masked tokens only to make it more comparable to LLM baselines
-        relevant_mask = x_THW[:, 1:] == self.mask_token_id  # could also get mask of corrupted tokens by uncommenting line in `get_maskgit_collator`
-        # print ("FORWARD", relevant_mask.shape, x_THW.shape)
+        # relevant_mask = x_THW == self.mask_token_id  # could also get mask of corrupted tokens by uncommenting line in `get_maskgit_collator`
+        relevant_mask = x_THW[:, 3:] == self.mask_token_id  # could also get mask of corrupted tokens by uncommenting line in `get_maskgit_collator`
+
         relevant_loss, relevant_acc = self.compute_loss_and_acc(logits_CTHW, labels, relevant_mask)
 
         return ModelOutput(loss=relevant_loss, acc=relevant_acc, logits=logits_CTHW)
@@ -300,8 +323,8 @@ class STMaskGIT(nn.Module, PyTorchModelHubMixin):
                     elif module == self.out_x_proj:
                         nn.init.xavier_uniform_(self.out_x_proj.weight)
                     else:
-                        nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-2.0, b=2.0) # try this next
-                        # module.weight.data.normal_(mean=0.0, std=std)
+                    #     nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-2.0, b=2.0) # try this next
+                        module.weight.data.normal_(mean=0.0, std=std)
 
                 if module.bias is not None:
                     module.bias.data.zero_()

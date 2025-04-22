@@ -9,6 +9,7 @@ class GenieConfig:
     num_layers: int
     num_heads: int
     d_model: int
+    d_action: int = 25
     T: int = 16  # temporal sequence length
     S: int = 256  # spatial sequence length, e.g. 256 for 16x16
     image_vocab_size: int = 262144  # image_vocab_size: number of distinct image tokens;
@@ -25,6 +26,8 @@ class GenieConfig:
     # Case 2: Not standard MLM, `non_mlm`. Some earlier frames are left unmasked, as in Copilot4D.
     non_mlm_ratio: float = 0.5
     num_prompt_frames: int = 1
+
+    with_act = False
 
     use_rope: bool = True
 

@@ -28,14 +28,14 @@ from genie.st_mask_git import STMaskGIT
 
 
 # Hardcoded values for the v1.1 dataset
-WINDOW_SIZE = 16
-STRIDE = 15  # Data is 30 Hz so with stride 15, video is 2 Hz
+WINDOW_SIZE = 6
+STRIDE = 17  # Data is 30 Hz so with stride 15, video is 2 Hz
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate GENIE-style models.")
     parser.add_argument(
-        "--val_data_dir", type=str, default="../data/val_v1.1",
+        "--val_data_dir", type=str, default="/home/aditya/1xgpt-The-North-Team_testing/data/val_v2.0",
         help="A directory with video data, should have a `metadata.json` and `video.bin`."
     )
     parser.add_argument(
@@ -43,7 +43,7 @@ def parse_args():
         help="Path to a HuggingFace-style checkpoint."
     )
     parser.add_argument(
-        "--batch_size", type=int, default=16,
+        "--batch_size", type=int, default=1,
         help="Batch size, current script only supports a single GPU."
     )
     parser.add_argument(
@@ -88,7 +88,7 @@ class GenieEvaluator:
         self.maskgit_steps = args.maskgit_steps
         self.temperature = args.temperature
 
-    def predict_zframe_logits(self, input_ids: torch.LongTensor) -> tuple[torch.LongTensor, torch.FloatTensor]:
+    def predict_zframe_logits(self, input_ids: torch.LongTensor, start_frame=3) -> tuple[torch.LongTensor, torch.FloatTensor]:
         """
         Conditioned on each prefix: [frame_0], [frame_0, frame_1], ..., [frame_0, frame_1, ... frame_{T-1}],
         predict the tokens in the following frame: [pred_frame_1, pred_frame_2, ..., pred_frame_T].
@@ -113,9 +113,13 @@ class GenieEvaluator:
             h=self.latent_h, w=self.latent_w).to(self.device)
         all_samples = []
         all_logits = []
-        for timestep in range(1, WINDOW_SIZE):
+        for timestep in range(start_frame, WINDOW_SIZE):
             print(f"Generating frame {timestep}")
             inputs_masked = inputs_THW.clone()
+
+            if timestep > start_frame:
+                inputs_masked[:, start_frame:timestep] = torch.stack(all_samples, dim=1)
+
             inputs_masked[:, timestep:] = self.model.mask_token_id
 
             # MaskGIT sampling
@@ -158,10 +162,12 @@ def main():
     transformers.set_seed(42)
     args = parse_args()
 
-    val_dataset = RawTokenDataset(args.val_data_dir, window_size=WINDOW_SIZE, stride=STRIDE, filter_overlaps=True)
-    args.latent_h = args.latent_w = val_dataset.metadata["s"]
+    val_dataset = RawTokenDataset(args.val_data_dir, is_eval=True)
+    args.latent_h = args.latent_w = 32
 
-    decode_latents = decode_latents_wrapper()
+    # decode_latents = decode_latents_wrapper()
+    decode_latents = None
+
     lpips_alex = lpips.LPIPS(net="alex")  # Calculate LPIPS w/ AlexNet, which is the fastest model out of their options
 
     if args.max_examples is not None:
@@ -186,25 +192,25 @@ def main():
         frames_per_batch = (WINDOW_SIZE - 1) * batch["input_ids"].size(0)
         metrics["gen_time"].update((time.time() - start_time) / frames_per_batch, batch_size)
 
-        loss = compute_loss(batch["labels"], factored_logits)
+        loss = compute_loss(batch["labels"], factored_logits, num_factored_vocabs=1, factored_vocab_size=64000)
 
-        acc = (reshaped_input_ids[:, 1:].to("cuda") == samples).float().mean().item()
+        acc = (reshaped_input_ids[:, 3:].to("cuda") == samples).float().mean().item()
 
         metrics["loss"].update(loss, batch_size)
         metrics["acc"].update(acc, batch_size)
 
-        start_time = time.time()
-        pred_frames = evaluator.predict_next_frames(samples)
-        metrics["dec_time"].update((time.time() - start_time) / frames_per_batch, batch_size)
+        # start_time = time.time()
+        # pred_frames = evaluator.predict_next_frames(samples)
+        # metrics["dec_time"].update((time.time() - start_time) / frames_per_batch, batch_size)
 
-        decoded_gtruth = decode_tokens(reshaped_input_ids, decode_latents)
-        metrics["pred_lpips"].update_list(compute_lpips(decoded_gtruth[:, 1:], pred_frames, lpips_alex))
+        # decoded_gtruth = decode_tokens(reshaped_input_ids, decode_latents)
+        # metrics["pred_lpips"].update_list(compute_lpips(decoded_gtruth[:, 1:], pred_frames, lpips_alex))
         
         print({key: f"{val.mean():.4f}" for key, val in metrics.items()})
         if args.save_outputs_dir is not None:
-            outputs_to_save["pred_frames"].append(pred_frames)
+            # outputs_to_save["pred_frames"].append(pred_frames)
             outputs_to_save["pred_logits"].append(factored_logits)
-            outputs_to_save["gtruth_frames"].append(decoded_gtruth)
+            # outputs_to_save["gtruth_frames"].append(decoded_gtruth)
             outputs_to_save["gtruth_tokens"].append(reshaped_input_ids)
     
     for key,val in metrics.items():
@@ -214,9 +220,9 @@ def main():
     if args.save_outputs_dir is not None:
         os.makedirs(args.save_outputs_dir, exist_ok=True)
         save_outputs_dir = Path(args.save_outputs_dir)
-        torch.save(torch.cat(outputs_to_save["pred_frames"], dim=0).cpu(), save_outputs_dir / "pred_frames.pt")
+        # torch.save(torch.cat(outputs_to_save["pred_frames"], dim=0).cpu(), save_outputs_dir / "pred_frames.pt")
         torch.save(torch.cat(outputs_to_save["pred_logits"], dim=0).cpu(), save_outputs_dir / "pred_logits.pt")
-        torch.save(torch.cat(outputs_to_save["gtruth_frames"], dim=0).cpu(), save_outputs_dir / "gtruth_frames.pt")
+        # torch.save(torch.cat(outputs_to_save["gtruth_frames"], dim=0).cpu(), save_outputs_dir / "gtruth_frames.pt")
         torch.save(torch.cat(outputs_to_save["gtruth_tokens"], dim=0).cpu(), save_outputs_dir / "gtruth_tokens.pt")
 
 

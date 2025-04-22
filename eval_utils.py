@@ -65,12 +65,12 @@ def compute_loss(
     assert factored_logits.dim() == 6 \
            and factored_logits.size()[:3] == (labels_flat.size(0), factored_vocab_size, num_factored_vocabs), \
            f"Shape of `logits` should be (B, {factored_vocab_size}, {num_factored_vocabs}, T-1, H, W)"
-    t = factored_logits.size(3) + 1
+    t = factored_logits.size(3) + 3
     h, w = factored_logits.size()[-2:]
     assert t * h * w == labels_flat.size(1), "Shape of `factored_logits` does not match flattened latent image size."
 
     labels_THW = rearrange(labels_flat, "b (t h w) -> b t h w", t=t, h=h, w=w)
-    labels_THW = labels_THW[:, 1:].to(factored_logits.device)
+    labels_THW = labels_THW[:, 3:].to(factored_logits.device)
 
     factored_labels = factorize_labels(labels_THW, num_factored_vocabs, factored_vocab_size)
     return torch.nn.functional.cross_entropy(factored_logits, factored_labels, reduction="none")\
